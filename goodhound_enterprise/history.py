@@ -45,6 +45,20 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 """
 
+# Columns added after the first release; older databases are upgraded in place.
+MIGRATIONS = {
+    "runs": {"exposure": "REAL", "risk_model": "TEXT"},
+    "observations": {"path_probability": "REAL", "reach": "REAL", "paths": "INTEGER"},
+}
+
+
+def _migrate(db: sqlite3.Connection) -> None:
+    for table, columns in MIGRATIONS.items():
+        existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        for name, sql_type in columns.items():
+            if name not in existing:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+
 
 @dataclass
 class HistoryDelta:
@@ -53,6 +67,7 @@ class HistoryDelta:
     resolved: list[tuple[str, str]]  # (start name, path text) present last run, gone now
     previous_run_at: str | None
     previous_users_with_path: int | None
+    previous_exposure: float | None = None
 
     def as_dict(self, total_paths: int) -> dict[str, object]:
         return {
@@ -63,6 +78,7 @@ class HistoryDelta:
             "resolved": self.resolved,
             "previous_run_at": self.previous_run_at,
             "previous_users_with_path": self.previous_users_with_path,
+            "previous_exposure": self.previous_exposure,
         }
 
 
@@ -75,9 +91,12 @@ def record(result: AnalysisResult, path: str | Path) -> HistoryDelta:
     db = sqlite3.connect(_db_path(path))
     try:
         db.executescript(SCHEMA)
+        _migrate(db)
         now = result.generated_at.isoformat(timespec="seconds")
+        model = result.settings.risk_model
         prev = db.execute(
-            "SELECT id, generated_at, users_with_path FROM runs WHERE tenant = ? ORDER BY id DESC LIMIT 1",
+            "SELECT id, generated_at, users_with_path, exposure, risk_model FROM runs "
+            "WHERE tenant = ? ORDER BY id DESC LIMIT 1",
             (result.tenant,),
         ).fetchone()
         previous_uids: set[str] = set()
@@ -85,9 +104,17 @@ def record(result: AnalysisResult, path: str | Path) -> HistoryDelta:
             previous_uids = {r[0] for r in db.execute("SELECT uid FROM observations WHERE run_id = ?", (prev[0],))}
 
         cur = db.execute(
-            "INSERT INTO runs (tenant, generated_at, total_enabled_users, users_with_path, total_paths) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (result.tenant, now, result.total_enabled_users, result.users_with_path, result.total_paths),
+            "INSERT INTO runs (tenant, generated_at, total_enabled_users, users_with_path, total_paths, exposure, "
+            "risk_model) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                result.tenant,
+                now,
+                result.total_enabled_users,
+                result.users_with_path,
+                result.total_paths,
+                result.exposure,
+                model,
+            ),
         )
         run_id = cur.lastrowid
         new = seen = 0
@@ -118,8 +145,20 @@ def record(result: AnalysisResult, path: str | Path) -> HistoryDelta:
                     ),
                 )
             db.execute(
-                "INSERT INTO observations VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (run_id, uid, row.members, row.percentage, row.path.length, row.path.cost, row.risk),
+                "INSERT INTO observations (run_id, uid, members, percentage, hops, cost, risk, path_probability, "
+                "reach, paths) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    uid,
+                    row.members,
+                    row.percentage,
+                    row.path.length,
+                    row.path.cost,
+                    row.risk,
+                    row.path.probability,
+                    row.reach,
+                    row.paths,
+                ),
             )
         resolved_uids = previous_uids - current
         resolved: list[tuple[str, str]] = []
@@ -130,6 +169,8 @@ def record(result: AnalysisResult, path: str | Path) -> HistoryDelta:
             if r:
                 resolved.append((r[0], r[1]))
         db.commit()
-        return HistoryDelta(new, seen, resolved, prev[1] if prev else None, prev[2] if prev else None)
+        # Exposure is only comparable between runs of the same risk model.
+        prev_exposure = prev[3] if prev and prev[4] == model else None
+        return HistoryDelta(new, seen, resolved, prev[1] if prev else None, prev[2] if prev else None, prev_exposure)
     finally:
         db.close()

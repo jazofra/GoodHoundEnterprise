@@ -1,19 +1,24 @@
-"""GoodHound's prioritisation logic, re-implemented on top of ``CypherGraphSource``.
+"""GoodHound's prioritisation, re-implemented on BloodHound Enterprise with a probabilistic risk model.
 
-Pipeline (mirrors GoodHound, adapted to Hunter's constraints):
+Pipeline:
 
 1. Count enabled, non-Tier Zero users (the population at risk).
-2. Page through every non-Tier Zero group (100 per query) and fetch the
-   shortest paths from each one to Tier Zero (one bounded query per group).
-   The cheapest of the shortest paths is kept.  Because any sub-path of a
-   shortest path is itself shortest, intermediate groups on a path inherit
-   their suffix and are not queried again.
+2. Page through every non-Tier Zero group and fetch the shortest paths from
+   each one to Tier Zero (one bounded query per group). They form that group's
+   *attack graph*: every visible path, each relationship with a success
+   probability.
 3. Optionally find paths users hold in their own right (first hop is not
-   ``MemberOf``), joining each user's first hop to the neighbour's memoised
-   shortest path (GoodHound's user fallback, without its blind spot).
+   ``MemberOf``): each user's first hops joined to the neighbour's attack graph.
 4. Count the enabled non-Tier Zero members (nested) of every start group.
-5. Score, rank and de-duplicate ("busiest paths").
-6. Count how many paths every single relationship appears in ("weakest links").
+5. Per start node: the most likely path (shown), the reach probability over
+   all visible paths, and risk = reach x share of users ("busiest paths").
+6. Exposure for the whole tenant, counting each user once at their best group.
+7. Weakest links: the single relationships whose removal lowers that exposure
+   the most, computed with distinct users.
+
+``risk_model = "goodhound"`` restores GoodHound's original formula
+(fewest-hop path, ``(1 - cost/max_cost) x % users``, links ranked by path count).
+See docs/RISK_MODEL.md.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from datetime import UTC, datetime
 from . import cypher
 from .config import REMEDIATION_HINTS, Settings
 from .graph import AttackPath, Hop, Node
+from .risk import AttackGraph, EdgeKey, GEdge, Reach, RiskContext, distinct_exposure
 from .source import CypherGraphSource
 
 log = logging.getLogger(__name__)
@@ -37,23 +43,33 @@ ProgressFn = Callable[[str], None]
 
 @dataclass
 class PathResult:
-    path: AttackPath
+    path: AttackPath  # the most likely path (GoodHound model: fewest hops, then cheapest)
     start_label: str
     members: int
     percentage: float
     risk: float
+    reach: float = 1.0  # probability that at least one visible path works
+    paths: int = 1  # visible paths (capped at exact_path_limit + 1)
+    exact: bool = True  # reach computed exactly (False: Monte Carlo)
+    graph: AttackGraph | None = field(default=None, repr=False, compare=False)
 
     @property
     def query(self) -> str:
         return cypher.view_path([(h.source.objectid, h.kind, h.target.objectid) for h in self.path.hops])
 
+    @property
+    def paths_label(self) -> str:
+        return str(self.paths) if self.exact else f"{self.paths - 1}+"
+
 
 @dataclass
 class WeakLink:
     hop: Hop
-    paths: int
-    percentage: float
-    users_exposed: int
+    paths: int  # start nodes whose risk depends on it
+    percentage: float  # ... as a share of all start nodes with a path
+    users_exposed: int  # distinct users in those start nodes
+    risk_reduction: float | None = None  # exposure points removed by deleting it (probability model)
+    estimate: bool = False
 
     @property
     def text(self) -> str:
@@ -81,6 +97,8 @@ class AnalysisResult:
     weakest: list[WeakLink]
     queries_sent: int
     settings: Settings
+    exposure: float | None = None  # expected % of users whose compromise reaches Tier Zero
+    exposure_is_estimate: bool = False
     history: dict[str, object] = field(default_factory=dict)
 
     @property
@@ -99,10 +117,16 @@ def risk_score(cost: int, percentage: float, max_cost: int) -> float:
     return round(max(0.0, (max_cost - cost) / max_cost) * percentage, 1)
 
 
+def probability_risk(reach: float, members: int, total_users: int) -> float:
+    """Expected % of all enabled non-Tier Zero users who reach Tier Zero through this start node."""
+    return round(100.0 * reach * members / total_users, 2) if total_users else 0.0
+
+
 SORT_KEYS: dict[str, Callable[[PathResult], tuple]] = {
-    "risk": lambda r: (-r.risk, r.path.cost, r.path.length, r.path.start.display),
+    "risk": lambda r: (-r.risk, -r.reach, r.path.length, r.path.cost, r.path.start.display),
     "users": lambda r: (-r.members, -r.risk, r.path.start.display),
     "hops": lambda r: (r.path.length, -r.risk, r.path.start.display),
+    "probability": lambda r: (-r.reach, -r.risk, r.path.start.display),
 }
 
 
@@ -114,10 +138,10 @@ def _in_scope(node: Node, label: str, settings: Settings) -> bool:
     return not (label == "User" and node.properties.get("enabled") is False)
 
 
-async def _discover_groups(source: CypherGraphSource, progress: ProgressFn) -> dict[str, AttackPath]:
-    """Shortest (then cheapest) path to Tier Zero from every non-Tier Zero group."""
+async def _discover_groups(source: CypherGraphSource, ctx: RiskContext, progress: ProgressFn) -> dict[str, AttackGraph]:
+    """Attack graph to Tier Zero for every non-Tier Zero group that has one."""
     settings = source.settings
-    found: dict[str, AttackPath] = {}
+    found: dict[str, AttackGraph] = {}
     no_path: set[str] = set()
     sem = asyncio.Semaphore(settings.concurrency)
     scanned = 0
@@ -127,15 +151,20 @@ async def _discover_groups(source: CypherGraphSource, progress: ProgressFn) -> d
             # Checked after acquiring the slot so suffixes found meanwhile are reused.
             if node.objectid in found or node.objectid in no_path:
                 return
-            path = await source.shortest_path(node, "Group")
-        if path is None:
+            graph = await source.shortest_paths(node, "Group")
+        attack_graph = ctx.build(graph, node.objectid)
+        if attack_graph is None:
             no_path.add(node.objectid)
             return
-        found.setdefault(node.objectid, path)
-        # Sub-paths of a shortest path are shortest paths: reuse them.
-        for i, hop in enumerate(path.hops[1:], start=1):
-            if _in_scope(hop.source, "Group", settings) and hop.source.objectid not in found:
-                found[hop.source.objectid] = path.suffix(i, settings.cost)
+        found.setdefault(node.objectid, attack_graph)
+        if settings.reuse_suffixes:
+            # An intermediate group's part of this graph is a subset of its own: fewer queries,
+            # but its reach may be underestimated. Off by default.
+            for hop in attack_graph.best_path(ctx.objective).hops[1:]:
+                if _in_scope(hop.source, "Group", settings) and hop.source.objectid not in found:
+                    sub = attack_graph.sub(hop.source.objectid)
+                    if sub is not None:
+                        found[hop.source.objectid] = sub
 
     async for page in source.iter_start_pages("Group"):
         await asyncio.gather(*(resolve(n) for n in page))
@@ -145,27 +174,28 @@ async def _discover_groups(source: CypherGraphSource, progress: ProgressFn) -> d
 
 
 async def _discover_users(
-    source: CypherGraphSource, known: dict[str, AttackPath], progress: ProgressFn
-) -> dict[str, AttackPath]:
-    """Paths users have *in their own right* (first hop is not MemberOf).
+    source: CypherGraphSource, ctx: RiskContext, known: dict[str, AttackGraph], progress: ProgressFn
+) -> dict[str, AttackGraph]:
+    """Attack graphs for paths users hold *in their own right* (first hop is not MemberOf).
 
-    GoodHound dropped MemberOf from user searches entirely, which hid paths
-    such as user -ForceChangePassword-> svc -MemberOf-> admins.  Here each
-    user's first non-membership hops are fetched and joined to the neighbour's
-    shortest tail, which is memoised (many users share neighbours).
+    GoodHound dropped MemberOf from user searches entirely, which hid paths such as
+    user -ForceChangePassword-> svc -MemberOf-> admins. Here each user's first
+    non-membership hops are joined to the neighbour's attack graph, which is memoised
+    (many users share neighbours).
     """
     settings = source.settings
     sem = asyncio.Semaphore(settings.concurrency)
-    tails: dict[str, asyncio.Task[AttackPath | None]] = {}
-    found: dict[str, AttackPath] = {}
+    tails: dict[str, asyncio.Future[AttackGraph | None]] = {}
+    found: dict[str, AttackGraph] = {}
     scanned = 0
 
-    async def fetch_tail(node: Node) -> AttackPath | None:
+    async def fetch_tail(node: Node) -> AttackGraph | None:
         if node.objectid in known:
             return known[node.objectid]
-        return await source.shortest_path(node, node.kind, max_hops=settings.max_hops - 1)
+        graph = await source.shortest_paths(node, node.kind, max_hops=settings.max_hops - 1)
+        return ctx.build(graph, node.objectid)
 
-    def tail(node: Node) -> asyncio.Task[AttackPath | None]:
+    def tail(node: Node) -> asyncio.Future[AttackGraph | None]:
         if node.objectid not in tails:
             tails[node.objectid] = asyncio.ensure_future(fetch_tail(node))
         return tails[node.objectid]
@@ -173,23 +203,27 @@ async def _discover_users(
     async def resolve(user: Node) -> None:
         async with sem:
             first = await source.first_hops(user)
-        best: AttackPath | None = None
-        for kind, neighbour in first:
-            hop = Hop(user, kind, neighbour)
-            step = settings.cost(kind, neighbour.kind)
-            if neighbour.tier_zero:
-                candidate = AttackPath(user, (hop,), step)
-            elif settings.max_hops > 1 and neighbour.kind:
-                rest = await tail(neighbour)
-                if rest is None or any(h.target.objectid == user.objectid for h in rest.hops):
-                    continue  # no path, or it loops back through this user
-                candidate = AttackPath(user, (hop, *rest.hops), step + rest.cost)
-            else:
+        nodes: dict[str, Node] = {user.objectid: user}
+        edges: list[GEdge] = []
+        for edge, neighbour in first:
+            if not neighbour.objectid or not neighbour.kind:
                 continue
-            if best is None or (candidate.length, candidate.cost) < (best.length, best.cost):
-                best = candidate
-        if best is not None:
-            found[user.objectid] = best
+            p = ctx.edge_probability(edge, neighbour)
+            nodes[neighbour.objectid] = neighbour
+            edges.append(
+                GEdge(user.objectid, neighbour.objectid, edge.kind, p, settings.cost(edge.kind, neighbour.kind))
+            )
+            if neighbour.tier_zero or settings.max_hops <= 1:
+                continue
+            rest = await tail(neighbour)
+            if rest is None:
+                continue
+            nodes.update(rest.nodes)
+            # Drop anything that loops back through the user (its own memberships belong to the groups).
+            edges.extend(e for e in rest.edges if user.objectid not in (e.src, e.dst))
+        attack_graph = AttackGraph.from_edges(user, nodes, edges)
+        if attack_graph is not None:
+            found[user.objectid] = attack_graph
 
     async for page in source.iter_start_pages("User"):
         await asyncio.gather(*(resolve(n) for n in page))
@@ -198,23 +232,116 @@ async def _discover_users(
     return found
 
 
-def weakest_links(results: list[PathResult], limit: int) -> list[WeakLink]:
-    counts: Counter[tuple[str, str, str]] = Counter()
-    exposure: defaultdict[tuple[str, str, str], int] = defaultdict(int)
-    sample: dict[tuple[str, str, str], Hop] = {}
-    for result in results:
-        seen: set[tuple[str, str, str]] = set()
-        for hop in result.path.hops:
+# --------------------------------------------------------------------------
+# Weakest links
+# --------------------------------------------------------------------------
+
+
+def goodhound_weakest_links(rows: list[PathResult], limit: int) -> list[WeakLink]:
+    """GoodHound's ranking: how many (shown) paths each relationship appears in."""
+    counts: Counter[EdgeKey] = Counter()
+    exposure: defaultdict[EdgeKey, int] = defaultdict(int)
+    sample: dict[EdgeKey, Hop] = {}
+    for row in rows:
+        for hop in dict.fromkeys(row.path.hops):
             key = (hop.source.objectid, hop.kind, hop.target.objectid)
-            if key in seen:
-                continue
-            seen.add(key)
             counts[key] += 1
-            exposure[key] += result.members
+            exposure[key] += row.members
             sample.setdefault(key, hop)
-    total = len(results) or 1
+    total = len(rows) or 1
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], -exposure[kv[0]], kv[0]))
-    return [WeakLink(sample[key], n, round(n / total * 100, 1), exposure[key]) for key, n in ranked[:limit]]
+    return [
+        WeakLink(sample[key], n, round(n / total * 100, 1), exposure[key], estimate=True) for key, n in ranked[:limit]
+    ]
+
+
+async def probability_weakest_links(
+    rows: list[PathResult],
+    limit: int,
+    settings: Settings,
+    total_users: int,
+    exposure: float | None,
+    count_users,
+    max_exact_links: int = 60,
+) -> list[WeakLink]:
+    """Rank single relationships by how much tenant exposure disappears when they are removed.
+
+    Candidates are the relationships on the shown paths. Each is scored exactly with distinct
+    users (each user at their best remaining group), which accounts for users who keep another
+    path through a different group. A cheap upper bound decides which candidates need scoring.
+    """
+    sample: dict[EdgeKey, Hop] = {}
+    for row in rows:
+        for hop in row.path.hops:
+            sample.setdefault((hop.source.objectid, hop.kind, hop.target.objectid), hop)
+
+    # Reach of every start node without each candidate (only where the candidate is in its graph).
+    without: dict[EdgeKey, dict[int, float]] = defaultdict(dict)
+    rough: dict[EdgeKey, float] = defaultdict(float)
+    for idx, row in enumerate(rows):
+        if row.graph is None:
+            continue
+        for key in row.graph.keys & sample.keys():
+            reduced = row.graph.reach(settings, exclude=[key]).probability
+            if reduced < row.reach - 1e-12:
+                without[key][idx] = reduced
+                rough[key] += (row.reach - reduced) * row.members
+
+    # The group-level sum is an upper bound of the exact (distinct-user) reduction, because
+    # max(before) - max(after) <= sum(before - after). Evaluating candidates in order of that bound and
+    # stopping once the limit-th exact score beats the next bound gives the exact top list.
+    ordered = sorted(rough, key=lambda k: (-rough[k], k))
+    groups = {idx: row for idx, row in enumerate(rows) if row.start_label == "Group"}
+    users = {idx: row for idx, row in enumerate(rows) if row.start_label == "User"}
+    scored: list[WeakLink] = []
+    truncated = False
+    for n_done, key in enumerate(ordered):
+        bound = 100.0 * rough[key] / total_users if total_users else 0.0
+        best = sorted((w.risk_reduction or 0.0 for w in scored), reverse=True)
+        if len(best) >= limit and best[limit - 1] >= bound:
+            break
+        if n_done >= max_exact_links:
+            truncated = True
+            break
+        affected = without[key]
+        reduction: float | None = None
+        estimate = False
+        if exposure is not None:
+            after, est = await distinct_exposure(
+                {rows[i].path.start.objectid: affected.get(i, rows[i].reach) for i in groups},
+                {rows[i].path.start.objectid: affected.get(i, rows[i].reach) for i in users},
+                total_users,
+                count_users,
+                settings.exposure_levels,
+            )
+            if after is not None:
+                reduction, estimate = max(0.0, exposure - after), est
+        if reduction is None:  # fall back to the upper bound
+            reduction, estimate = bound, True
+        affected_groups = frozenset(rows[i].path.start.objectid for i in affected if i in groups)
+        distinct = await count_users(affected_groups) if affected_groups else 0
+        if distinct is None:
+            distinct, estimate = sum(rows[i].members for i in affected if i in groups), True
+        distinct += sum(1 for i in affected if i in users)
+        scored.append(
+            WeakLink(
+                sample[key],
+                len(affected),
+                round(len(affected) / (len(rows) or 1) * 100, 1),
+                min(distinct, total_users) if total_users else distinct,
+                round(reduction, 2),
+                estimate or bool(users),
+            )
+        )
+    if truncated:
+        log.warning("Weakest links: stopped after %d exact evaluations; ranking may be approximate", max_exact_links)
+        for w in scored:
+            w.estimate = True
+    scored.sort(key=lambda w: (-(w.risk_reduction or 0.0), -w.paths, w.text))
+    return scored[:limit]
+
+
+# --------------------------------------------------------------------------
 
 
 async def analyse(
@@ -228,39 +355,73 @@ async def analyse(
     settings = source.settings
     progress = progress or (lambda msg: log.info(msg))
     started = datetime.now(UTC)
+    ctx = RiskContext(settings, started)
 
     progress("Counting enabled non-Tier Zero users")
     total_users, domains = await asyncio.gather(source.count_enabled_users(), source.domains())
 
-    progress("Finding shortest paths from groups to Tier Zero")
-    group_paths = await _discover_groups(source, progress)
-    found: dict[str, tuple[AttackPath, str]] = {oid: (p, "Group") for oid, p in group_paths.items()}
+    progress("Finding paths from groups to Tier Zero")
+    group_graphs = await _discover_groups(source, ctx, progress)
+    found: dict[str, tuple[AttackGraph, str]] = {oid: (g, "Group") for oid, g in group_graphs.items()}
     if settings.include_users or not found:
         progress("Finding paths users hold in their own right (not via group membership)")
-        user_paths = await _discover_users(source, group_paths, progress)
-        found.update({oid: (p, "User") for oid, p in user_paths.items()})
+        user_graphs = await _discover_users(source, ctx, group_graphs, progress)
+        found.update({oid: (g, "User") for oid, g in user_graphs.items()})
 
     group_ids = [oid for oid, (_, label) in found.items() if label == "Group"]
     progress(f"Counting members of {len(group_ids)} groups with a path")
     counts = await asyncio.gather(*(source.member_count(found[oid][0].start) for oid in group_ids))
     members = dict(zip(group_ids, counts, strict=True))
 
-    max_cost = settings.max_path_cost
+    progress("Scoring paths")
+    probability_model = settings.risk_model == "probability"
     rows: list[PathResult] = []
-    for oid, (path, label) in found.items():
+    for oid, (attack_graph, label) in found.items():
         n = members.get(oid, 1) if label == "Group" else 1
         pct = round(n / total_users * 100, 1) if total_users else 0.0
-        rows.append(PathResult(path, label, n, pct, risk_score(path.cost, pct, max_cost)))
+        path = attack_graph.best_path(ctx.objective)
+        reach: Reach = attack_graph.reach(settings)
+        risk = (
+            probability_risk(reach.probability, n, total_users)
+            if probability_model
+            else risk_score(path.cost, pct, settings.max_path_cost)
+        )
+        rows.append(PathResult(path, label, n, pct, risk, reach.probability, reach.paths, reach.exact, attack_graph))
 
-    user_ids = [oid for oid, (_, label) in found.items() if label == "User"]
-    via_groups = await source.unique_members(group_ids)
-    estimate = via_groups is None or bool(user_ids)
+    # Distinct-user counts, memoised: the same group sets come up for many levels and links.
+    cache: dict[frozenset[str], int | None] = {}
+
+    async def count_users(groups: frozenset[str]) -> int | None:
+        if groups not in cache:
+            cache[groups] = await source.unique_members(sorted(groups))
+        return cache[groups]
+
+    user_rows = [r for r in rows if r.start_label == "User"]
+    via_groups = await count_users(frozenset(group_ids))
+    estimate = via_groups is None or bool(user_rows)
     if via_groups is None:
         via_groups = sum(members.values())
-    users_with_path = min(via_groups + len(user_ids), total_users) if total_users else via_groups + len(user_ids)
+    users_with_path = via_groups + len(user_rows)
+    if total_users:
+        users_with_path = min(users_with_path, total_users)
 
-    key = SORT_KEYS.get(sort, SORT_KEYS["risk"])
-    ranked = sorted(rows, key=key)
+    exposure: float | None = None
+    exposure_estimate = False
+    if probability_model:
+        progress("Computing exposure with distinct users")
+        exposure, exposure_estimate = await distinct_exposure(
+            {r.path.start.objectid: r.reach for r in rows if r.start_label == "Group"},
+            {r.path.start.objectid: r.reach for r in user_rows},
+            total_users,
+            count_users,
+            settings.exposure_levels,
+        )
+        progress("Ranking weakest links by exposure removed")
+        weakest = await probability_weakest_links(rows, results, settings, total_users, exposure, count_users)
+    else:
+        weakest = goodhound_weakest_links(rows, results)
+
+    ranked = sorted(rows, key=SORT_KEYS.get(sort, SORT_KEYS["risk"]))
     return AnalysisResult(
         tenant=tenant,
         generated_at=started,
@@ -270,7 +431,9 @@ async def analyse(
         users_with_path_is_estimate=estimate,
         all_paths=ranked,
         busiest=ranked[:results],
-        weakest=weakest_links(rows, results),
+        weakest=weakest,
         queries_sent=source.queries_sent,
         settings=settings,
+        exposure=None if exposure is None else round(exposure, 2),
+        exposure_is_estimate=exposure_estimate,
     )

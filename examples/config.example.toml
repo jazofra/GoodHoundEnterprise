@@ -15,6 +15,25 @@ target_label = "Tag_Tier_Zero"
 # This costs one query per enabled user, so it is slow on large tenants.
 include_users = false
 
+# Risk model: "probability" (default) or "goodhound" (the original cost formula).
+# See docs/RISK_MODEL.md for the formulas and the default probabilities.
+risk_model = "probability"
+
+# Chance that each attacker action (any hop except MemberOf/Contains/GPLink) is
+# detected and stopped. Raise it for a strong SOC; 0 disables it.
+per_action_detection = 0.05
+
+# A session's probability halves every N days since BloodHound last saw it (0 = off).
+session_half_life_days = 14
+
+# Fetch every equally short path (allShortestPaths) so alternative routes raise
+# the reach probability. Falls back to shortestPath automatically if rejected.
+all_shortest_paths = true
+
+# Let intermediate groups reuse another group's path: fewer queries, but their
+# reach can be underestimated.
+reuse_suffixes = false
+
 # Throughput. Hunter's documented shared limit is 55 requests/s per client IP.
 concurrency = 4
 rate_limit = 10.0
@@ -36,3 +55,14 @@ CanRDP = 0          # GoodHound's value; raise it if RDP is hard to abuse in you
 # Cost overrides that depend on the target node kind ("Edge->TargetKind").
 [targeted_edges]
 "GenericAll->Domain" = 2
+
+# Success probability per relationship kind (0-1), before session ageing and
+# detection. Unlisted kinds use default_probability (0.7).
+[edge_probability]
+HasSession = 0.6    # 0.3 if Credential Guard / Protected Users are everywhere
+CanRDP = 0.4        # non-admin RDP still needs local privilege escalation
+# WriteSPN = 0.5    # depends on password strength of the target account
+
+# Probability overrides that depend on the target node kind ("Edge->TargetKind").
+[targeted_edge_probability]
+# "GenericAll->Domain" = 0.8

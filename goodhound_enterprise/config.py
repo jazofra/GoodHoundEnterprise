@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 #: Hunter rejects variable-length traversals longer than this.
@@ -74,6 +75,80 @@ DEFAULT_EDGE_COSTS: dict[str, int] = {
     "CoerceAndRelayNTLMToLDAP": 3,
     "CoerceAndRelayNTLMToLDAPS": 3,
 }
+
+# --------------------------------------------------------------------------
+# Probability model
+# --------------------------------------------------------------------------
+# Chance that an attacker who controls the source of a relationship can use it
+# to take control of the target, with public tooling and without special luck.
+# These are calibration defaults (see docs/RISK_MODEL.md), not measurements:
+# override them per environment in the TOML file under [edge_probability].
+DEFAULT_EDGE_PROBABILITY: dict[str, float] = {
+    # Structural: no attacker action needed.
+    "MemberOf": 1.0,
+    "Contains": 1.0,
+    "GPLink": 0.95,  # the modified GPO still has to apply (refresh, filtering)
+    # Direct control: reliable, well-documented abuse.
+    "GenericAll": 0.9,
+    "GenericWrite": 0.9,
+    "WriteDacl": 0.9,
+    "WriteOwner": 0.9,
+    "Owns": 0.9,
+    "AllExtendedRights": 0.9,
+    "AddMember": 0.95,
+    "AddSelf": 0.95,
+    "ForceChangePassword": 0.95,
+    "ReadLAPSPassword": 0.95,
+    "ReadGMSAPassword": 0.95,
+    "SyncLAPSPassword": 0.9,
+    "DumpSMSAPassword": 0.9,
+    "DCSync": 0.95,
+    "HasSIDHistory": 0.9,
+    "AdminTo": 0.9,
+    "SQLAdmin": 0.8,
+    "OwnsLimitedRights": 0.85,
+    "WriteOwnerLimitedRights": 0.85,
+    "WriteGPLink": 0.8,
+    "WriteAccountRestrictions": 0.8,
+    # Need extra conditions or tooling.
+    "AllowedToDelegate": 0.85,
+    "AllowedToAct": 0.85,
+    "AddAllowedToAct": 0.8,
+    "AddKeyCredentialLink": 0.8,  # needs PKINIT support on a DC
+    "WriteSPN": 0.5,  # targeted Kerberoast: the password still has to crack
+    "GoldenCert": 0.9,
+    "ADCSESC1": 0.9,
+    "ADCSESC3": 0.85,
+    "ADCSESC4": 0.85,
+    "ADCSESC6a": 0.8,
+    "ADCSESC6b": 0.8,
+    "ADCSESC9a": 0.7,
+    "ADCSESC9b": 0.7,
+    "ADCSESC10a": 0.7,
+    "ADCSESC10b": 0.7,
+    "ADCSESC13": 0.85,
+    "CoerceToTGT": 0.6,
+    # Non-admin interactive access: harvesting a session still needs local
+    # privilege escalation on the host.
+    "CanRDP": 0.4,
+    "CanPSRemote": 0.4,
+    "ExecuteDCOM": 0.4,
+    # The privileged session must be present when the attacker acts, and
+    # Credential Guard / Protected Users may stop the theft. Decays with age.
+    "HasSession": 0.6,
+    "CoerceAndRelayNTLMToSMB": 0.5,
+    "CoerceAndRelayNTLMToADCS": 0.6,
+    "CoerceAndRelayNTLMToLDAP": 0.5,
+    "CoerceAndRelayNTLMToLDAPS": 0.5,
+}
+
+DEFAULT_TARGETED_PROBABILITY: dict[str, float] = {}
+
+#: Relationships that need no attacker action; they never count as an action
+#: hop and are not exposed to per-action detection.
+STRUCTURAL_EDGES = frozenset({"MemberOf", "Contains", "GPLink"})
+
+RISK_MODELS = ("probability", "goodhound")
 
 # GoodHound priced some rights higher when the target is a Domain object.
 # Keys are "EdgeKind->TargetKind".
@@ -138,6 +213,31 @@ class Settings:
     #: 55 req/s per client IP, so stay well below it.
     rate_limit: float = 10.0
 
+    # --- risk model -------------------------------------------------------
+    #: "probability" (default) or "goodhound" (the original cost formula).
+    risk_model: str = "probability"
+    edge_probability: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_EDGE_PROBABILITY))
+    targeted_probability: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_TARGETED_PROBABILITY))
+    default_probability: float = 0.7
+    #: Chance that each attacker *action* (non-structural hop) is detected and
+    #: stopped. Makes every extra action hop cost something.
+    per_action_detection: float = 0.05
+    #: HasSession probability halves every N days since the session was last
+    #: seen (0 disables the decay).
+    session_half_life_days: float = 14.0
+    #: Paths enumerated per start node for the exact reach probability; above
+    #: this a seeded Monte Carlo estimate is used.
+    exact_path_limit: int = 12
+    monte_carlo_samples: int = 4000
+    #: Distinct probability levels used for distinct-user exposure queries.
+    exposure_levels: int = 25
+    #: Fetch every equally short path (allShortestPaths) rather than one per target,
+    #: so alternative routes count in the reach probability. Falls back automatically.
+    all_shortest_paths: bool = True
+    #: Reuse an intermediate group's suffix of another group's path instead of
+    #: querying it (fewer queries, but its reach can be underestimated).
+    reuse_suffixes: bool = False
+
     def __post_init__(self) -> None:
         if not 1 <= self.max_hops <= HUNTER_MAX_HOPS:
             raise ValueError(f"max_hops must be between 1 and {HUNTER_MAX_HOPS} (Hunter limit)")
@@ -145,10 +245,50 @@ class Settings:
             value = getattr(self, name)
             if not 1 <= value <= HUNTER_MAX_LIMIT:
                 raise ValueError(f"{name} must be between 1 and {HUNTER_MAX_LIMIT} (Hunter limit)")
+        if self.risk_model not in RISK_MODELS:
+            raise ValueError(f"risk_model must be one of {', '.join(RISK_MODELS)}")
+        probabilities = {
+            **self.edge_probability,
+            **self.targeted_probability,
+            "default_probability": self.default_probability,
+            "per_action_detection": self.per_action_detection,
+        }
+        for name, value in probabilities.items():
+            if not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"Probability for {name} must be between 0 and 1, got {value}")
+        if self.session_half_life_days < 0:
+            raise ValueError("session_half_life_days must be >= 0")
+        if not 1 <= self.exact_path_limit <= 16:
+            raise ValueError("exact_path_limit must be between 1 and 16")
 
     @property
     def traversable_edges(self) -> list[str]:
-        return list(self.edge_costs)
+        return list(dict.fromkeys([*self.edge_costs, *self.edge_probability]))
+
+    def probability(
+        self,
+        edge_kind: str,
+        target_kind: str | None = None,
+        last_seen: str | None = None,
+        now: datetime | None = None,
+    ) -> float:
+        """Effective chance that an attacker gets across one relationship.
+
+        technique probability x session freshness (HasSession only)
+        x (1 - per-action detection) for every non-structural hop.
+        """
+        p = None
+        if target_kind:
+            p = self.targeted_probability.get(f"{edge_kind}->{target_kind}")
+        if p is None:
+            p = self.edge_probability.get(edge_kind, self.default_probability)
+        if edge_kind == "HasSession" and self.session_half_life_days and last_seen and now:
+            age = _age_days(last_seen, now)
+            if age is not None and age > 0:
+                p *= 0.5 ** (age / self.session_half_life_days)
+        if edge_kind not in STRUCTURAL_EDGES:
+            p *= 1.0 - self.per_action_detection
+        return max(0.0, min(1.0, p))
 
     def cost(self, edge_kind: str, target_kind: str | None = None) -> int:
         if target_kind:
@@ -178,7 +318,19 @@ def load_settings(path: str | Path | None, **overrides: object) -> Settings:
         edges = raw.pop("edges", None)
         targeted = raw.pop("targeted_edges", None)
         replace = bool(raw.pop("replace_default_edges", False))
+        probabilities = raw.pop("edge_probability", None)
+        targeted_p = raw.pop("targeted_edge_probability", None)
         data.update(raw)
+        if probabilities is not None:
+            base_p = {} if replace else dict(DEFAULT_EDGE_PROBABILITY)
+            base_p.update({str(k): float(v) for k, v in probabilities.items()})
+            data["edge_probability"] = base_p
+        elif replace:
+            data["edge_probability"] = {}
+        if targeted_p is not None:
+            base_tp = dict(DEFAULT_TARGETED_PROBABILITY)
+            base_tp.update({str(k): float(v) for k, v in targeted_p.items()})
+            data["targeted_probability"] = base_tp
         if edges is not None:
             base = {} if replace else dict(DEFAULT_EDGE_COSTS)
             base.update({str(k): int(v) for k, v in edges.items()})
@@ -193,3 +345,13 @@ def load_settings(path: str | Path | None, **overrides: object) -> Settings:
     if unknown:
         raise ValueError(f"Unknown setting(s): {', '.join(sorted(unknown))}")
     return Settings(**data)  # type: ignore[arg-type]
+
+
+def _age_days(last_seen: str, now: datetime) -> float | None:
+    try:
+        seen = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=UTC)
+    return (now - seen).total_seconds() / 86400

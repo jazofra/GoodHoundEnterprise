@@ -10,7 +10,7 @@ from typing import Any
 from . import cypher
 from .backends.base import CypherExecutor, QueryError, RateLimiter
 from .config import Settings
-from .graph import AttackPath, Graph, Node, best_path, parse_graph
+from .graph import Edge, Graph, Node, parse_graph
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +23,7 @@ class CypherGraphSource:
         self._sem = asyncio.Semaphore(settings.concurrency)
         self._limiter = RateLimiter(settings.rate_limit)
         self.queries_sent = 0
+        self._all_shortest_unsupported = False
 
     async def query(self, query: str) -> Graph:
         cypher.assert_hunter_safe(query, self.settings.max_hops)
@@ -46,12 +47,14 @@ class CypherGraphSource:
     async def scalar(self, query: str, key: str) -> int:
         graph = await self.query(query)
         value = graph.literal(key)
-        if value is None:
-            # BHE answers 404 / empty for "no rows"; a count of nothing is 0.
-            return 0
         if isinstance(value, list) and value:
             value = value[0]
-        return int(value)
+        # count() always returns a row, so a missing value means the result was not understood.
+        # Treating it as 0 would silently produce wrong percentages and risk scores.
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise QueryError(f"Expected a number named {key!r} but got {graph.literals!r}\nQuery: {query}") from None
 
     # ------------------------------------------------------------------
 
@@ -77,19 +80,30 @@ class CypherGraphSource:
                 return
             after = page[-1].objectid
 
-    async def shortest_path(self, start: Node, start_label: str, max_hops: int | None = None) -> AttackPath | None:
-        query = cypher.shortest_paths_from(self.settings, start_label, start.objectid, max_hops)
-        graph = await self.query(query)
-        return best_path(graph, start.objectid, self.settings.cost, allowed_edges=self.settings.traversable_edges)
+    async def shortest_paths(self, start: Node, start_label: str, max_hops: int | None = None) -> Graph:
+        """Union of the shortest paths from ``start`` to the reachable Tier Zero nodes.
 
-    async def first_hops(self, user: Node) -> list[tuple[str, Node]]:
+        Prefers ``allShortestPaths`` (every equally short alternative, which the reach
+        probability needs) and falls back to ``shortestPath`` (one path per target) for good
+        if the backend rejects it.
+        """
+        if self.settings.all_shortest_paths and not self._all_shortest_unsupported:
+            query = cypher.all_shortest_paths_from(self.settings, start_label, start.objectid, max_hops)
+            try:
+                return await self.query(query)
+            except QueryError as exc:
+                self._all_shortest_unsupported = True
+                log.warning("allShortestPaths rejected (%s); falling back to shortestPath", str(exc)[:200])
+        return await self.query(cypher.shortest_paths_from(self.settings, start_label, start.objectid, max_hops))
+
+    async def first_hops(self, user: Node) -> list[tuple[Edge, Node]]:
         graph = await self.query(cypher.first_hops(self.settings, user.objectid))
         start = graph.by_objectid(user.objectid)
         if start is None:
             return []
         return sorted(
-            ((e.kind, graph.nodes[e.target]) for e in graph.edges if e.source == start.id and e.target in graph.nodes),
-            key=lambda kv: (kv[0], kv[1].objectid),
+            ((e, graph.nodes[e.target]) for e in graph.edges if e.source == start.id and e.target in graph.nodes),
+            key=lambda kv: (kv[0].kind, kv[1].objectid),
         )
 
     async def member_count(self, group: Node) -> int:

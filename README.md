@@ -13,12 +13,20 @@ with the BHE REST API as a fallback.
 
 It answers GoodHound's questions:
 
-- **Busiest paths.** Which non-Tier Zero groups expose the most enabled users to a
-  path to Tier Zero, and how cheap is that path to exploit? Each path gets a risk
-  score.
-- **Weakest links.** Which single relationships appear in the most paths? Removing
-  one breaks every path that uses it.
-- **Trend.** What is new since the last run, and which paths are no longer seen?
+- **Busiest paths.** Which non-Tier Zero groups put the most users within reach of Tier
+  Zero? Each start node gets its most likely path, a reach probability over all its
+  visible paths, and a risk score. The risk is the expected share of users whose
+  compromise reaches Tier Zero through that node.
+- **Weakest links.** Which single relationships remove the most exposure when deleted?
+  This is counted with distinct users, so users who keep another route don't inflate it.
+- **Exposure and trend.** What share of users can reach Tier Zero, weighted by
+  probability and with each user counted once? What changed since the last run, and
+  which paths are no longer seen?
+
+The risk model weighs hops (every attacker action multiplies the odds), alternative
+paths (more routes, higher reach), each relationship's likelihood, and how recently a
+session was seen. [docs/RISK_MODEL.md](docs/RISK_MODEL.md) gives the formulas, the
+defaults and the assumptions. `--risk-model goodhound` keeps GoodHound's original formula.
 
 ## How it works with Hunter
 
@@ -29,12 +37,12 @@ traversals at 10 hops, and it allows no writes. GoodHound's queries break all of
 those rules, so this tool runs many small, bounded queries instead:
 
 1. Page through every non-Tier Zero group (100 per query).
-2. Run one bounded shortest-path query per group to `Tag_Tier_Zero`, and pick the
-   fewest hops, then the lowest exploit cost. Intermediate groups reuse the suffix
-   of the path, so they are not queried again.
+2. Run one bounded `allShortestPaths` query per group to `Tag_Tier_Zero`. The result
+   is that group's attack graph, with a success probability on every relationship.
 3. Count enabled non-Tier Zero members (nested) per group.
-4. Score, rank, count the weakest links, record the run in SQLite, and write the
-   reports.
+4. Compute each group's most likely path, reach and risk. Then compute exposure with
+   distinct-user counts, and the exposure each relationship's removal would cut.
+5. Record the run in SQLite and write the reports.
 
 Every query is checked against Hunter's rules before it is sent.
 
@@ -77,11 +85,12 @@ yourself and paste back the address the browser was redirected to. If
 auto-discovery picks the wrong Hunter tool, override it with `--cypher-tool`,
 `--cypher-arg` and `--tool-arg key=value`.
 
-Sample reports from the demo tenant are in [`examples/demo-report/`](examples/demo-report/):
-`1-baseline.*` is the first run, and `2-after-fix.*` is a second run after removing
-Domain Users' RDP right. The second shows the trend section, with the fixed path
-listed as no longer seen and the share of exposed users dropping from 100% to
-38%.
+Sample reports from the demo tenant are in [`examples/demo-report/`](examples/demo-report/).
+`1-baseline.*` is the first run. `2-after-fix.*` is a second run after removing Domain Users'
+RDP right. In the baseline, the two links behind that path top the weakest links at 12.85
+points of exposure each. After the fix, exposure drops from 35.84% to 22.99%, exactly as
+predicted, and SQL01's session becomes the new top link because its users no longer have
+a fallback route.
 
 ## Options (mapped from GoodHound)
 
@@ -92,7 +101,8 @@ listed as no longer seen and the share of exposed users dropping from 100% to
 | `-d`, `-r`, `--sort risk\|users\|hops`, `-q/-v/--debug` | Same |
 | `-sch` schema file (Cypher writes) | `-c config.toml`: edge costs, target label, limits (read-only) |
 | `--db-skip`, `-sqlpath` | `--db-skip`, `--db` |
-| — | `--domain-sid`, `--max-hops` (≤10), `--target-label`, `--include-users`, `--concurrency`, `--rate-limit` |
+| — | `--risk-model probability\|goodhound`, `--detection`, `--session-half-life`, `--sort probability` |
+| — | `--domain-sid`, `--max-hops` (≤10), `--target-label`, `--include-users`, `--reuse-suffixes`, `--one-path-per-target`, `--concurrency`, `--rate-limit` |
 
 See [`examples/config.example.toml`](examples/config.example.toml) for the
 edge-cost model.
@@ -141,7 +151,8 @@ connection.
 ```
 goodhound_enterprise/
   cli.py          run / fleet / discover / logout
-  analysis.py     busiest paths, risk score, weakest links (the GoodHound logic)
+  analysis.py     busiest paths, exposure, weakest links
+  risk.py         attack graphs, path/reach probabilities, distinct-user exposure
   source.py       high-level graph questions → bounded Cypher, retries, rate limit
   cypher.py       query builders + assert_hunter_safe()
   graph.py        BloodHound unified-graph parsing, local cheapest-shortest path
@@ -150,7 +161,7 @@ goodhound_enterprise/
   backends/       hunter (MCP + OAuth), rest (HMAC API token), demo (synthetic AD)
   fleet/          gateway (agents' read-only tools), agent loop, orchestrator, prompts, plan report
 tests/            unit tests + fake Hunter server (in-process and over HTTP) + scripted fake model
-docs/FEASIBILITY.md, docs/FLEET.md
+docs/FEASIBILITY.md, docs/RISK_MODEL.md, docs/FLEET.md
 ```
 
 Run the tests with `pytest`.

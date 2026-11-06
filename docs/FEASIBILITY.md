@@ -76,7 +76,8 @@ CE/Legacy:
 | — | Many queries | **Suffix reuse:** every intermediate group on a shortest path inherits its suffix and is never queried |
 | Recursive membership walk | — | One `count(DISTINCT u)` per group with `MemberOf*1..10`, plus one `IN [...]` query for the distinct total |
 | User fallback without `MemberOf` | It hid paths such as *user → ForceChangePassword → svc → MemberOf → admins* | Fetch each user's first **non-membership** hops, then join them to the neighbour's memoised shortest tail. Users share neighbours, so tails are cached |
-| `maxcost = max(hops)*3+1` | Scores change whenever the dataset changes | Fixed ceiling `max_hops × max edge cost + 1` (31 by default), so scores are **comparable between runs** |
+| `risk = (1 − cost/maxcost) × % users`, `maxcost = max(hops)*3+1` | Scores change whenever the dataset changes, and cost barely moves the score | A **probabilistic model** ([RISK_MODEL.md](RISK_MODEL.md)): per-relationship success probabilities, reach over all visible paths, risk = reach × share of users, and tenant exposure with distinct users. GoodHound's formula stays available with `--risk-model goodhound` |
+| Weakest links = most common relationship | The link behind a path to 100% of users can rank below a link shared by a few small groups | Ranked by **exposure removed**, recomputed with distinct users (users who keep another route don't count) |
 | Weakest-link query via `apoc.path.combine` | No APOC | Counted on the client, with a plain one-edge view query per link |
 | "BloodHound query" matched by `name` | — | Matched by `objectid` and ending in `LIMIT 1`, so it works in Explore **and** through Hunter |
 | SQLite `paths` table | It only knew "new" | `runs` + `paths` + `observations` tables add **paths no longer seen** (fixed or re-routed) and trend data. The uid uses object ids, so renames do not create "new" paths |

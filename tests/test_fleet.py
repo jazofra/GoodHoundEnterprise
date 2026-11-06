@@ -65,7 +65,11 @@ async def test_gateway_tools_answer_from_the_graph(gateway):
     assert out["relationships"][0]["relationship"] == "HasSession"
 
     out, _ = await call(gateway, "paths_using_link", source_objectid=SQL01, kind="HasSession", target_objectid=JSMITH)
-    assert out["count"] == 4
+    assert out["count"] == 6  # every start node whose attack graph contains it, not only its shown path
+    it = next(r for r in out["start_nodes"] if r["start"].startswith("IT SUPPORT"))
+    assert it["reach_without_this_link"] < it["reach_probability"]  # loses one of its two routes
+    dev = next(r for r in out["start_nodes"] if r["start"].startswith("DEVELOPERS"))
+    assert dev["reach_without_this_link"] == 0  # its only route
 
 
 async def test_path_without_link_shows_what_remains(gateway):
@@ -77,8 +81,10 @@ async def test_path_without_link_shows_what_remains(gateway):
         kind="AdminTo",
         target_objectid=WS01,
     )
-    assert "SERVER ADMINS" in out["remaining_path"] and out["hops"] == 3
+    assert "SERVER ADMINS" in out["remaining_most_likely_path"] and out["hops"] == 3
     assert out["searched"] == "all shortest paths"
+    assert 0 < out["reach_probability_after"] < out["reach_probability_before"]
+    assert out["reach_probability_after"] == pytest.approx(out["remaining_path_probability"])
     out, _ = await call(
         gateway,
         "path_without_link",
@@ -87,7 +93,7 @@ async def test_path_without_link_shows_what_remains(gateway):
         kind="HasSession",
         target_objectid=JSMITH,
     )
-    assert out["remaining_path"] is None
+    assert out["remaining_most_likely_path"] is None and out["reach_probability_after"] == 0
 
 
 async def test_gateway_guard_rails_and_audit(gateway):
