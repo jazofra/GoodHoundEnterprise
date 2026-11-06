@@ -91,6 +91,17 @@ def shortest_paths_from(settings: Settings, start_label: str, objectid: str, max
     )
 
 
+def all_shortest_paths_from(settings: Settings, start_label: str, objectid: str) -> str:
+    """Every shortest path (not one per target) from a start node to Tier Zero."""
+    tz = _label(settings.target_label)
+    rels = rel_types(settings.traversable_edges)
+    return (
+        f"MATCH p=allShortestPaths((s:{_label(start_label)} {{objectid: {literal(objectid)}}})"
+        f"-[:{rels}*1..{settings.max_hops}]->(t:{tz})) "
+        f"RETURN p LIMIT {HUNTER_MAX_LIMIT}"
+    )
+
+
 def first_hops(settings: Settings, user_objectid: str) -> str:
     """A user's outbound attack edges other than group membership."""
     rels = rel_types(e for e in settings.traversable_edges if e != "MemberOf")
@@ -114,6 +125,20 @@ def unique_members(settings: Settings, group_objectids: Sequence[str]) -> str:
         f"WHERE g.objectid IN [{ids}] AND u.enabled = true AND NOT u:{tz} "
         "RETURN count(DISTINCT u) AS users LIMIT 1"
     )
+
+
+def node_by_objectid(objectid: str) -> str:
+    return f"MATCH (n {{objectid: {literal(objectid)}}}) RETURN n LIMIT 1"
+
+
+def inbound(objectid: str, kinds: Iterable[str], limit: int = HUNTER_MAX_LIMIT) -> str:
+    """One-hop relationships of the given kinds that point *at* an object."""
+    return f"MATCH p=(a)-[:{rel_types(kinds)}]->(n {{objectid: {literal(objectid)}}}) RETURN p LIMIT {limit}"
+
+
+def outbound(objectid: str, kinds: Iterable[str], limit: int = HUNTER_MAX_LIMIT) -> str:
+    """One-hop relationships of the given kinds that start *from* an object."""
+    return f"MATCH p=(n {{objectid: {literal(objectid)}}})-[:{rel_types(kinds)}]->(b) RETURN p LIMIT {limit}"
 
 
 def list_domains() -> str:

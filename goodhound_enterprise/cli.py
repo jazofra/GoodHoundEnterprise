@@ -88,10 +88,51 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="Analyse the tenant and write the reports", epilog=EPILOG)
+    _add_run_args(run, default_formats="stdout + html")
+
+    fleet = sub.add_parser(
+        "fleet",
+        help="Analyse, then send AI agents to investigate the weakest links and busiest paths",
+        epilog="Needs the 'fleet' extra (pip install 'goodhound-enterprise[fleet]') and Claude API credentials.",
+    )
+    _add_run_args(fleet, default_formats="html")
+    f = fleet.add_argument_group("Agent fleet")
+    f.add_argument("--links", type=int, default=5, help="Weakest links to investigate (one agent each)")
+    f.add_argument("--paths", type=int, default=3, help="Busiest paths to validate (one agent each)")
+    f.add_argument("--worker-model", default="claude-sonnet-5-5", help="Model for the analyst agents")
+    f.add_argument("--worker-effort", default="medium", choices=("low", "medium", "high", "xhigh", "max"))
+    f.add_argument("--lead-model", default="claude-opus-5-5", help="Model that writes the remediation plan")
+    f.add_argument("--lead-effort", default="high", choices=("low", "medium", "high", "xhigh", "max"))
+    f.add_argument("--agents", type=int, default=4, help="Agents running at the same time")
+    f.add_argument("--max-turns", type=int, default=16, help="Model turns per analyst agent")
+    f.add_argument(
+        "--token-budget",
+        type=int,
+        default=3_000_000,
+        help="Total tokens (input+output+cache) after which no new agent turns start",
+    )
+    f.add_argument(
+        "--no-fallbacks",
+        action="store_true",
+        help="Do not let the API retry a declined request on its recommended fallback model",
+    )
+    f.add_argument("--dry-run", action="store_true", help="Run the analysis and print the agent tasks; call no model")
+
+    disc = sub.add_parser("discover", help="Connect to Hunter MCP and list its tools, prompts and status")
+    _add_connection(disc, backends=False)
+    disc.add_argument("--json", type=Path, help="Also write the catalogue to this file")
+
+    logout = sub.add_parser("logout", help="Forget cached Hunter OAuth tokens for a tenant")
+    logout.add_argument("-u", "--url", default=os.environ.get("BHE_URL"), required=os.environ.get("BHE_URL") is None)
+    logout.add_argument("--token-dir", type=Path)
+    return parser
+
+
+def _add_run_args(run: argparse.ArgumentParser, *, default_formats: str) -> None:
     _add_connection(run)
     o = run.add_argument_group("Output")
     o.add_argument(
-        "-o", "--output-format", action="append", choices=report.FORMATS, help="Repeatable. Default: stdout + html"
+        "-o", "--output-format", action="append", choices=report.FORMATS, help=f"Repeatable. Default: {default_formats}"
     )
     o.add_argument("-d", "--output-dir", type=Path, default=Path("ghe-reports"))
     o.add_argument("-r", "--results", type=int, default=5, help="Rows in the busiest paths / weakest links tables")
@@ -116,15 +157,6 @@ def build_parser() -> argparse.ArgumentParser:
     lg.add_argument("-q", "--quiet", action="store_true")
     lg.add_argument("-v", "--verbose", action="store_true")
     lg.add_argument("--debug", action="store_true")
-
-    disc = sub.add_parser("discover", help="Connect to Hunter MCP and list its tools, prompts and status")
-    _add_connection(disc, backends=False)
-    disc.add_argument("--json", type=Path, help="Also write the catalogue to this file")
-
-    logout = sub.add_parser("logout", help="Forget cached Hunter OAuth tokens for a tenant")
-    logout.add_argument("-u", "--url", default=os.environ.get("BHE_URL"), required=os.environ.get("BHE_URL") is None)
-    logout.add_argument("--token-dir", type=Path)
-    return parser
 
 
 @asynccontextmanager
@@ -172,8 +204,8 @@ def _tenant_name(args: argparse.Namespace) -> str:
     return urlparse(url).hostname or args.url
 
 
-async def cmd_run(args: argparse.Namespace) -> int:
-    settings = load_settings(
+def _settings(args: argparse.Namespace):
+    return load_settings(
         args.config,
         max_hops=args.max_hops,
         target_label=args.target_label,
@@ -182,23 +214,88 @@ async def cmd_run(args: argparse.Namespace) -> int:
         concurrency=args.concurrency,
         rate_limit=args.rate_limit,
     )
-    formats = args.output_format or ["stdout", "html"]
-    progress = (lambda msg: None) if args.quiet else (lambda msg: print(f"[*] {msg}", file=sys.stderr))
-    async with open_executor(args) as executor:
-        source = CypherGraphSource(executor, settings)
-        result = await analyse(
-            source, tenant=_tenant_name(args), results=args.results, sort=args.sort, progress=progress
-        )
+
+
+def _progress(args: argparse.Namespace):
+    return (lambda msg: None) if args.quiet else (lambda msg: print(f"[*] {msg}", file=sys.stderr))
+
+
+def _finish_analysis(args: argparse.Namespace, result, formats: list[str], progress) -> None:
     if not args.db_skip:
         delta = history.record(result, args.db)
         result.history = delta.as_dict(result.total_paths)
     if args.quiet:
         formats = [f for f in formats if f != "stdout"]
-    written = report.emit(result, formats, args.output_dir)
-    for path in written:
+    for path in report.emit(result, formats, args.output_dir):
         progress(f"Wrote {path}")
     if not result.all_paths:
-        progress(f"No paths to {settings.target_label}. Congratulations!")
+        progress(f"No paths to {result.settings.target_label}. Congratulations!")
+
+
+async def cmd_run(args: argparse.Namespace) -> int:
+    settings = _settings(args)
+    progress = _progress(args)
+    async with open_executor(args) as executor:
+        source = CypherGraphSource(executor, settings)
+        result = await analyse(
+            source, tenant=_tenant_name(args), results=args.results, sort=args.sort, progress=progress
+        )
+    _finish_analysis(args, result, args.output_format or ["stdout", "html"], progress)
+    return 0
+
+
+async def cmd_fleet(args: argparse.Namespace) -> int:
+    from .fleet import FleetConfig, run_fleet
+    from .fleet import report as fleet_report
+    from .fleet.gateway import Gateway
+    from .fleet.orchestrator import plan_tasks
+
+    settings = _settings(args)
+    progress = _progress(args)
+    cfg = FleetConfig(
+        links=args.links,
+        paths=args.paths,
+        worker_model=args.worker_model,
+        worker_effort=args.worker_effort,
+        lead_model=args.lead_model,
+        lead_effort=args.lead_effort,
+        concurrency=args.agents,
+        max_turns=args.max_turns,
+        token_budget=args.token_budget,
+        fallbacks=not args.no_fallbacks,
+    )
+    client = None
+    if not args.dry_run:
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError:
+            raise SystemExit("The fleet needs the Anthropic SDK: pip install 'goodhound-enterprise[fleet]'") from None
+        client = AsyncAnthropic()
+    async with open_executor(args) as executor:
+        source = CypherGraphSource(executor, settings)
+        results = max(args.results, args.links, args.paths)
+        result = await analyse(source, tenant=_tenant_name(args), results=results, sort=args.sort, progress=progress)
+        _finish_analysis(args, result, args.output_format or ["html"], progress)
+        tasks = plan_tasks(result, cfg)
+        if args.dry_run:
+            for task in tasks:
+                print(f"--- {task.item} ({task.kind}) ---\n{task.prompt}\n")
+            progress(f"Dry run: {len(tasks)} agents would be launched; no model was called")
+            return 0
+        if not tasks:
+            progress("Nothing for the fleet to investigate")
+            return 0
+        hunter = executor if getattr(executor, "name", "") == "hunter" else None
+        gateway = Gateway(source, result, hunter)
+        try:
+            fleet_result = await run_fleet(gateway, client, cfg, progress)
+        finally:
+            await client.close()
+    for path in fleet_report.write(fleet_result, args.output_dir):
+        progress(f"Wrote {path}")
+    if fleet_result.plan_error:
+        progress(f"No remediation plan: {fleet_result.plan_error}")
+        return 1
     return 0
 
 
@@ -255,6 +352,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "run":
             return asyncio.run(cmd_run(args))
+        if args.command == "fleet":
+            return asyncio.run(cmd_fleet(args))
         if args.command == "discover":
             return asyncio.run(cmd_discover(args))
         return cmd_logout(args)

@@ -115,7 +115,29 @@ probably owns it, and the expected effect ("breaks N of M paths, roughly X users
 Where a matching BloodHound Enterprise finding exists, use its remediation text,
 cite it, and do not invent your own.
 
-## 5. Guard-rails
+## 5. Fleet mode (fan out the investigation)
+
+Use this when the user wants the remediation plan built in depth, not just the numbers.
+
+- **With an Anthropic API key and the package installed,** run
+  `goodhound-enterprise fleet --url "$BHE_URL" -d ghe-reports`. It runs the analysis, sends one agent
+  per weakest link and per busiest path, re-checks their claims in code, and writes
+  `*_GoodHoundEnterprise_fleet.{md,html,json}`. Add `--dry-run` first to see the tasks without calling a
+  model. Then summarise the plan for the user.
+- **Inside Claude Code, without the CLI's API key,** do the same with subagents:
+  1. Get the numbers from the CLI JSON (§0), or from the method in §3.
+  2. In one message, start one `ghe-link-investigator` per top weakest link (default 5) and one
+     `ghe-path-validator` per top busiest path (default 3). Give each its item id, the objectids and
+     relationship kinds, the counts, and the report JSON path. They run in parallel and share this
+     session's Hunter connection.
+  3. Re-check every card's `still_exists` yourself with one bounded query per card. Treat any mismatch
+     as `needs_human_review`.
+  4. Merge the cards into the remediation plan of §4: at most 8 actions, numbers only from the analysis,
+     with failed or unverified cards listed as caveats.
+
+Do not use subagents to count paths or members. That is the deterministic engine's job.
+
+## 6. Guard-rails
 
 - Everything is read-only. Never suggest that you can change BloodHound or AD
   yourself.
