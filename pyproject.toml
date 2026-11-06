@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "goodhound-enterprise"
+version = "0.1.0"
+description = "GoodHound-style busiest-path and weakest-link prioritisation for BloodHound Enterprise, via the Hunter MCP server (or the BHE REST API)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.3,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+goodhound-enterprise = "goodhound_enterprise.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["goodhound_enterprise*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"goodhound_enterprise/report.py" = ["E501"]  # embedded HTML/CSS template

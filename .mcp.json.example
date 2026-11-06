@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bloodhound-hunter": {
+      "type": "http",
+      "url": "https://YOUR-TENANT.bloodhoundenterprise.io/api/v2/hunter/mcp"
+    }
+  }
+}

@@ -1,0 +1,527 @@
+{
+  "tenant": "demo (CONTOSO.LOCAL)",
+  "generated_at": "2026-11-06T13:10:59.726424+00:00",
+  "summary": {
+    "Tenant": "demo (CONTOSO.LOCAL)",
+    "Generated (UTC)": "2026-11-06 13:10",
+    "Domains": "CONTOSO.LOCAL",
+    "Enabled non-Tier Zero users": "386",
+    "Non-Tier Zero users with a path": "386",
+    "% of enabled non-Tier Zero users with a path": "100.0%",
+    "Start nodes with a path (total paths)": "9",
+    "History": "First run for this tenant: baseline recorded",
+    "Queries sent": "21"
+  },
+  "settings": {
+    "target_label": "Tag_Tier_Zero",
+    "max_hops": 10,
+    "domain_sid": null,
+    "max_path_cost": 31
+  },
+  "busiest_paths": [
+    {
+      "uid": "b99bfea88f4e13d29d59a53720e6f1ed",
+      "start": {
+        "name": "DOMAIN USERS@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-513",
+        "kind": "Group"
+      },
+      "members": 386,
+      "percentage": 100.0,
+      "hops": 2,
+      "cost": 3,
+      "risk": 90.3,
+      "path": "DOMAIN USERS@CONTOSO.LOCAL - CanRDP -> APP01.CONTOSO.LOCAL - HasSession -> ADM.KLEE@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-513",
+          "kind": "CanRDP",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1303",
+          "target_name": "APP01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1303",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1106",
+          "target_name": "ADM.KLEE@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-513'})-[:CanRDP]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1303'})-[:HasSession]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1106'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "a98f9099d8562338957aaf0be293d67b",
+      "start": {
+        "name": "DEVELOPERS@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1205",
+        "kind": "Group"
+      },
+      "members": 68,
+      "percentage": 17.6,
+      "hops": 3,
+      "cost": 5,
+      "risk": 14.8,
+      "path": "DEVELOPERS@CONTOSO.LOCAL - GenericWrite -> SQL ADMINS@CONTOSO.LOCAL - AdminTo -> SQL01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1205",
+          "kind": "GenericWrite",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1204",
+          "target_name": "SQL ADMINS@CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1204",
+          "kind": "AdminTo",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "target_name": "SQL01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+          "target_name": "ADM.JSMITH@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1205'})-[:GenericWrite]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1204'})-[:AdminTo]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1302'})-[:HasSession]->(n3 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "d82b79d843581c01461df959d3c66f67",
+      "start": {
+        "name": "FINANCE@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1207",
+        "kind": "Group"
+      },
+      "members": 38,
+      "percentage": 9.8,
+      "hops": 1,
+      "cost": 2,
+      "risk": 9.2,
+      "path": "FINANCE@CONTOSO.LOCAL - ADCSESC1 -> CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1207",
+          "kind": "ADCSESC1",
+          "target": "S-1-5-21-1004336348-1177238915-682003330",
+          "target_name": "CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1207'})-[:ADCSESC1]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "ed9f4ba3f882b3a94fced77a55fc1060",
+      "start": {
+        "name": "SERVER ADMINS@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1203",
+        "kind": "Group"
+      },
+      "members": 40,
+      "percentage": 10.4,
+      "hops": 2,
+      "cost": 4,
+      "risk": 9.1,
+      "path": "SERVER ADMINS@CONTOSO.LOCAL - AdminTo -> SQL01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1203",
+          "kind": "AdminTo",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "target_name": "SQL01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+          "target_name": "ADM.JSMITH@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1203'})-[:AdminTo]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1302'})-[:HasSession]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "1b3d3e3a616c8219241f63c1361fa1fc",
+      "start": {
+        "name": "WORKSTATION ADMINS@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1209",
+        "kind": "Group"
+      },
+      "members": 40,
+      "percentage": 10.4,
+      "hops": 2,
+      "cost": 4,
+      "risk": 9.1,
+      "path": "WORKSTATION ADMINS@CONTOSO.LOCAL - AdminTo -> WS-ADMIN01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1209",
+          "kind": "AdminTo",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1301",
+          "target_name": "WS-ADMIN01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1301",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+          "target_name": "ADM.JSMITH@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1209'})-[:AdminTo]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1301'})-[:HasSession]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    }
+  ],
+  "weakest_links": [
+    {
+      "link": "SQL01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "source": "S-1-5-21-1004336348-1177238915-682003330-1302",
+      "kind": "HasSession",
+      "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+      "paths": 4,
+      "percentage": 44.4,
+      "users_exposed": 134,
+      "hint": "Stop privileged accounts logging on to this host (tiering, PAWs, logon restrictions).",
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1302'})-[:HasSession]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    },
+    {
+      "link": "WORKSTATION ADMINS@CONTOSO.LOCAL - AdminTo -> WS-ADMIN01.CONTOSO.LOCAL",
+      "source": "S-1-5-21-1004336348-1177238915-682003330-1209",
+      "kind": "AdminTo",
+      "target": "S-1-5-21-1004336348-1177238915-682003330-1301",
+      "paths": 3,
+      "percentage": 33.3,
+      "users_exposed": 109,
+      "hint": "Remove local admin rights; use LAPS and least privilege.",
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1209'})-[:AdminTo]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1301'}) RETURN p LIMIT 1"
+    },
+    {
+      "link": "WS-ADMIN01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "source": "S-1-5-21-1004336348-1177238915-682003330-1301",
+      "kind": "HasSession",
+      "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+      "paths": 3,
+      "percentage": 33.3,
+      "users_exposed": 109,
+      "hint": "Stop privileged accounts logging on to this host (tiering, PAWs, logon restrictions).",
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1301'})-[:HasSession]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    },
+    {
+      "link": "SQL ADMINS@CONTOSO.LOCAL - AdminTo -> SQL01.CONTOSO.LOCAL",
+      "source": "S-1-5-21-1004336348-1177238915-682003330-1204",
+      "kind": "AdminTo",
+      "target": "S-1-5-21-1004336348-1177238915-682003330-1302",
+      "paths": 3,
+      "percentage": 33.3,
+      "users_exposed": 94,
+      "hint": "Remove local admin rights; use LAPS and least privilege.",
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1204'})-[:AdminTo]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1302'}) RETURN p LIMIT 1"
+    },
+    {
+      "link": "DEVELOPERS@CONTOSO.LOCAL - GenericWrite -> SQL ADMINS@CONTOSO.LOCAL",
+      "source": "S-1-5-21-1004336348-1177238915-682003330-1205",
+      "kind": "GenericWrite",
+      "target": "S-1-5-21-1004336348-1177238915-682003330-1204",
+      "paths": 2,
+      "percentage": 22.2,
+      "users_exposed": 93,
+      "hint": "Remove the write ACE.",
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1205'})-[:GenericWrite]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1204'}) RETURN p LIMIT 1"
+    }
+  ],
+  "all_paths": [
+    {
+      "uid": "b99bfea88f4e13d29d59a53720e6f1ed",
+      "start": {
+        "name": "DOMAIN USERS@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-513",
+        "kind": "Group"
+      },
+      "members": 386,
+      "percentage": 100.0,
+      "hops": 2,
+      "cost": 3,
+      "risk": 90.3,
+      "path": "DOMAIN USERS@CONTOSO.LOCAL - CanRDP -> APP01.CONTOSO.LOCAL - HasSession -> ADM.KLEE@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-513",
+          "kind": "CanRDP",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1303",
+          "target_name": "APP01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1303",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1106",
+          "target_name": "ADM.KLEE@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-513'})-[:CanRDP]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1303'})-[:HasSession]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1106'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "a98f9099d8562338957aaf0be293d67b",
+      "start": {
+        "name": "DEVELOPERS@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1205",
+        "kind": "Group"
+      },
+      "members": 68,
+      "percentage": 17.6,
+      "hops": 3,
+      "cost": 5,
+      "risk": 14.8,
+      "path": "DEVELOPERS@CONTOSO.LOCAL - GenericWrite -> SQL ADMINS@CONTOSO.LOCAL - AdminTo -> SQL01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1205",
+          "kind": "GenericWrite",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1204",
+          "target_name": "SQL ADMINS@CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1204",
+          "kind": "AdminTo",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "target_name": "SQL01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+          "target_name": "ADM.JSMITH@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1205'})-[:GenericWrite]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1204'})-[:AdminTo]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1302'})-[:HasSession]->(n3 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "d82b79d843581c01461df959d3c66f67",
+      "start": {
+        "name": "FINANCE@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1207",
+        "kind": "Group"
+      },
+      "members": 38,
+      "percentage": 9.8,
+      "hops": 1,
+      "cost": 2,
+      "risk": 9.2,
+      "path": "FINANCE@CONTOSO.LOCAL - ADCSESC1 -> CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1207",
+          "kind": "ADCSESC1",
+          "target": "S-1-5-21-1004336348-1177238915-682003330",
+          "target_name": "CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1207'})-[:ADCSESC1]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "ed9f4ba3f882b3a94fced77a55fc1060",
+      "start": {
+        "name": "SERVER ADMINS@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1203",
+        "kind": "Group"
+      },
+      "members": 40,
+      "percentage": 10.4,
+      "hops": 2,
+      "cost": 4,
+      "risk": 9.1,
+      "path": "SERVER ADMINS@CONTOSO.LOCAL - AdminTo -> SQL01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1203",
+          "kind": "AdminTo",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "target_name": "SQL01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+          "target_name": "ADM.JSMITH@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1203'})-[:AdminTo]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1302'})-[:HasSession]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "1b3d3e3a616c8219241f63c1361fa1fc",
+      "start": {
+        "name": "WORKSTATION ADMINS@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1209",
+        "kind": "Group"
+      },
+      "members": 40,
+      "percentage": 10.4,
+      "hops": 2,
+      "cost": 4,
+      "risk": 9.1,
+      "path": "WORKSTATION ADMINS@CONTOSO.LOCAL - AdminTo -> WS-ADMIN01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1209",
+          "kind": "AdminTo",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1301",
+          "target_name": "WS-ADMIN01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1301",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+          "target_name": "ADM.JSMITH@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1209'})-[:AdminTo]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1301'})-[:HasSession]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "57ca2016f3004a7eaa166c7b4a1a7196",
+      "start": {
+        "name": "IT SUPPORT@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1202",
+        "kind": "Group"
+      },
+      "members": 40,
+      "percentage": 10.4,
+      "hops": 3,
+      "cost": 4,
+      "risk": 9.1,
+      "path": "IT SUPPORT@CONTOSO.LOCAL - MemberOf -> WORKSTATION ADMINS@CONTOSO.LOCAL - AdminTo -> WS-ADMIN01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1202",
+          "kind": "MemberOf",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1209",
+          "target_name": "WORKSTATION ADMINS@CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1209",
+          "kind": "AdminTo",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1301",
+          "target_name": "WS-ADMIN01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1301",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+          "target_name": "ADM.JSMITH@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1202'})-[:MemberOf]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1209'})-[:AdminTo]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1301'})-[:HasSession]->(n3 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "5db42a4b9a8c4c609775b476e8efdb74",
+      "start": {
+        "name": "HELPDESK@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1201",
+        "kind": "Group"
+      },
+      "members": 29,
+      "percentage": 7.5,
+      "hops": 4,
+      "cost": 4,
+      "risk": 6.5,
+      "path": "HELPDESK@CONTOSO.LOCAL - MemberOf -> IT SUPPORT@CONTOSO.LOCAL - MemberOf -> WORKSTATION ADMINS@CONTOSO.LOCAL - AdminTo -> WS-ADMIN01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1201",
+          "kind": "MemberOf",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1202",
+          "target_name": "IT SUPPORT@CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1202",
+          "kind": "MemberOf",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1209",
+          "target_name": "WORKSTATION ADMINS@CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1209",
+          "kind": "AdminTo",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1301",
+          "target_name": "WS-ADMIN01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1301",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+          "target_name": "ADM.JSMITH@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1201'})-[:MemberOf]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1202'})-[:MemberOf]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1209'})-[:AdminTo]->(n3 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1301'})-[:HasSession]->(n4 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "dc21a6c7625aa28fae1ee8105de65ec2",
+      "start": {
+        "name": "CONTRACTORS@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1206",
+        "kind": "Group"
+      },
+      "members": 25,
+      "percentage": 6.5,
+      "hops": 4,
+      "cost": 5,
+      "risk": 5.5,
+      "path": "CONTRACTORS@CONTOSO.LOCAL - MemberOf -> DEVELOPERS@CONTOSO.LOCAL - GenericWrite -> SQL ADMINS@CONTOSO.LOCAL - AdminTo -> SQL01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1206",
+          "kind": "MemberOf",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1205",
+          "target_name": "DEVELOPERS@CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1205",
+          "kind": "GenericWrite",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1204",
+          "target_name": "SQL ADMINS@CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1204",
+          "kind": "AdminTo",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "target_name": "SQL01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+          "target_name": "ADM.JSMITH@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1206'})-[:MemberOf]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1205'})-[:GenericWrite]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1204'})-[:AdminTo]->(n3 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1302'})-[:HasSession]->(n4 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    },
+    {
+      "uid": "0fbf0de414951d0ca17ed9eeb658d2d9",
+      "start": {
+        "name": "SQL ADMINS@CONTOSO.LOCAL",
+        "objectid": "S-1-5-21-1004336348-1177238915-682003330-1204",
+        "kind": "Group"
+      },
+      "members": 1,
+      "percentage": 0.3,
+      "hops": 2,
+      "cost": 4,
+      "risk": 0.3,
+      "path": "SQL ADMINS@CONTOSO.LOCAL - AdminTo -> SQL01.CONTOSO.LOCAL - HasSession -> ADM.JSMITH@CONTOSO.LOCAL",
+      "edges": [
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1204",
+          "kind": "AdminTo",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "target_name": "SQL01.CONTOSO.LOCAL"
+        },
+        {
+          "source": "S-1-5-21-1004336348-1177238915-682003330-1302",
+          "kind": "HasSession",
+          "target": "S-1-5-21-1004336348-1177238915-682003330-1105",
+          "target_name": "ADM.JSMITH@CONTOSO.LOCAL"
+        }
+      ],
+      "query": "MATCH p=(n0 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1204'})-[:AdminTo]->(n1 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1302'})-[:HasSession]->(n2 {objectid: 'S-1-5-21-1004336348-1177238915-682003330-1105'}) RETURN p LIMIT 1"
+    }
+  ],
+  "history": {
+    "new_paths": 9,
+    "seen_before": 0,
+    "pct_seen_before": 0.0,
+    "resolved_paths": 0,
+    "resolved": [],
+    "previous_run_at": null,
+    "previous_users_with_path": null
+  }
+}

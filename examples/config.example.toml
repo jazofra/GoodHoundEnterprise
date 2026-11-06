@@ -1,0 +1,38 @@
+# GoodHound Enterprise configuration (all keys optional).
+# Usage: goodhound-enterprise run -c examples/config.example.toml ...
+
+# Path length cap. Hunter rejects variable-length traversals above 10.
+max_hops = 10
+
+# Target zone label. Tag_Tier_Zero is BloodHound Enterprise's Tier Zero.
+# A custom Privilege Zone label can be used instead.
+target_label = "Tag_Tier_Zero"
+
+# Only start from groups/users in one domain (objectid prefix / domainsid).
+# domain_sid = "S-1-5-21-1004336348-1177238915-682003330"
+
+# Also look for paths individual users hold outside their group memberships.
+# This costs one query per enabled user, so it is slow on large tenants.
+include_users = false
+
+# Throughput. Hunter's documented shared limit is 55 requests/s per client IP.
+concurrency = 4
+rate_limit = 10.0
+
+# Cost of edges that are not listed below.
+default_cost = 1
+
+# Set to true to use ONLY the edges listed in [edges].
+replace_default_edges = false
+
+# Per-edge exploit cost. Every key is a traversable relationship kind used in
+# the shortest-path queries. Add new BloodHound edge kinds here as they ship.
+[edges]
+HasSession = 3
+CanRDP = 0          # GoodHound's value; raise it if RDP is hard to abuse in your estate
+# CoerceAndRelayNTLMToSMB = 3
+# SyncedToEntraUser = 1
+
+# Cost overrides that depend on the target node kind ("Edge->TargetKind").
+[targeted_edges]
+"GenericAll->Domain" = 2
