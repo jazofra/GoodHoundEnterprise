@@ -97,19 +97,50 @@ listed as no longer seen and the share of exposed users dropping from 100% to
 See [`examples/config.example.toml`](examples/config.example.toml) for the
 edge-cost model.
 
+## Agent fleet
+
+`goodhound-enterprise fleet` runs the analysis first and then puts Claude agents to work on its results:
+
+- one agent per top weakest link and per busiest path,
+- each agent investigates through read-only tools, all of which share the tool's single Hunter connection,
+- each returns a remediation card: whether the item still exists, the fix and its likely owner, what the
+  fix could break, what remains afterwards, and any matching BloodHound Enterprise finding,
+- the agents' claims are re-checked in code,
+- a lead agent writes the prioritised remediation plan.
+
+Preview the agent tasks without calling a model:
+
+```bash
+pip install -e ".[fleet]"
+goodhound-enterprise fleet --backend demo --dry-run
+```
+
+Run the fleet against a tenant:
+
+```bash
+goodhound-enterprise fleet --url https://YOUR-TENANT.bloodhoundenterprise.io
+```
+
+The agents investigate rather than count: paths and members are still counted by the deterministic
+engine, so the numbers stay reproducible. [docs/FLEET.md](docs/FLEET.md) covers the design, cost and
+safety controls, and the Claude Code subagent alternative.
+
 ## Agentic mode
 
 [`.claude/skills/goodhound-enterprise/SKILL.md`](.claude/skills/goodhound-enterprise/SKILL.md)
 teaches an MCP client the same method. It is meant for Claude Code connected to
 Hunter (see `.mcp.json.example`). The agent turns the CLI's JSON into a
 remediation plan, digs into individual paths with Hunter's typed tools, and falls
-back to doing the analysis by hand when the CLI is not available.
+back to doing the analysis by hand when the CLI is not available. Two subagents,
+`ghe-link-investigator` and `ghe-path-validator` in `.claude/agents/`, let Claude
+Code fan the investigation out in parallel over the session's single Hunter
+connection.
 
 ## Layout
 
 ```
 goodhound_enterprise/
-  cli.py          run / discover / logout
+  cli.py          run / fleet / discover / logout
   analysis.py     busiest paths, risk score, weakest links (the GoodHound logic)
   source.py       high-level graph questions → bounded Cypher, retries, rate limit
   cypher.py       query builders + assert_hunter_safe()
@@ -117,8 +148,9 @@ goodhound_enterprise/
   history.py      SQLite runs / paths / observations
   report.py       stdout, md, csv, html, json
   backends/       hunter (MCP + OAuth), rest (HMAC API token), demo (synthetic AD)
-tests/            unit tests + fake Hunter server (in-process and over HTTP)
-docs/FEASIBILITY.md
+  fleet/          gateway (agents' read-only tools), agent loop, orchestrator, prompts, plan report
+tests/            unit tests + fake Hunter server (in-process and over HTTP) + scripted fake model
+docs/FEASIBILITY.md, docs/FLEET.md
 ```
 
 Run the tests with `pytest`.

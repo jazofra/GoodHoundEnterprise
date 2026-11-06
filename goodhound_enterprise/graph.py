@@ -44,6 +44,8 @@ class Edge:
     source: str
     target: str
     kind: str
+    last_seen: str | None = field(default=None, compare=False, hash=False)
+    properties: Mapping[str, Any] = field(default_factory=dict, compare=False, hash=False)
 
 
 @dataclass
@@ -165,7 +167,7 @@ def parse_graph(result: Any, target_label: str = "Tag_Tier_Zero") -> Graph:
         kind = raw.get("kind") or raw.get("label") or raw.get("type")
         if source is None or target is None or not kind:
             continue
-        graph.edges.append(Edge(str(source), str(target), str(kind)))
+        graph.edges.append(Edge(str(source), str(target), str(kind), raw.get("lastSeen"), raw.get("properties") or {}))
     graph.literals = _literals_from(payload.get("literals"))
     return graph
 

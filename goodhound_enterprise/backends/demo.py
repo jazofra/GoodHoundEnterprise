@@ -28,6 +28,7 @@ class DemoNode:
     kind: str
     tier_zero: bool = False
     enabled: bool = True
+    description: str = ""
 
 
 @dataclass
@@ -91,6 +92,19 @@ def build_demo_graph(users: int = 400) -> DemoGraph:
         ]
     }
     svc_sql = g.add("1401", "SVC_SQL", "User")
+    descriptions = {
+        "APP01.CONTOSO.LOCAL": (
+            "Line-of-business app server (owner: Apps team). Domain Users granted RDP for the legacy client."
+        ),
+        "SQL01.CONTOSO.LOCAL": "SQL Server 2019 - finance DB (owner: DBA team)",
+        "WS-ADMIN01.CONTOSO.LOCAL": "Shared IT admin workstation (owner: IT Operations)",
+        "SQL ADMINS": "DBA team - local admins on SQL servers",
+        "DEVELOPERS": "All developers incl. contractors",
+        "ADM.JSMITH": "Domain admin account of J. Smith (IT Operations)",
+        "ADM.KLEE": "Domain admin account of K. Lee (Apps team)",
+    }
+    for node in g.nodes.values():
+        node.description = descriptions.get(node.name.split("@")[0], "")
 
     # Regular users, spread across departments; a few are disabled.
     plan = [
@@ -146,7 +160,13 @@ def _node_json(n: DemoNode) -> dict[str, Any]:
         "kinds": kinds,
         "objectId": n.objectid,
         "isTierZero": n.tier_zero,
-        "properties": {"name": n.name, "objectid": n.objectid, "enabled": n.enabled, "domainsid": DOMAIN_SID},
+        "properties": {
+            "name": n.name,
+            "objectid": n.objectid,
+            "enabled": n.enabled,
+            "domainsid": DOMAIN_SID,
+            "description": n.description,
+        },
     }
 
 
@@ -154,16 +174,26 @@ def _graph(nodes: list[DemoNode], edges: list[tuple[int, str, int]] = (), litera
     return {
         "data": {
             "nodes": {str(n.id): _node_json(n) for n in nodes},
-            "edges": [{"source": str(s), "target": str(t), "kind": k, "label": k} for s, k, t in edges],
+            "edges": [
+                {"source": str(s), "target": str(t), "kind": k, "label": k, "lastSeen": "2026-11-05T22:00:00Z"}
+                for s, k, t in edges
+            ],
             "literals": [{"key": k, "value": v} for k, v in literals],
         }
     }
 
 
 _LIMIT = re.compile(r"LIMIT (\d+)\s*$")
+_ALL_SHORTEST = re.compile(
+    r"allShortestPaths\(\(s:(\w+) \{objectid: '([^']+)'\}\)-\[:([\w|]+)\*1\.\.(\d+)\]->\(t:(\w+)\)\)"
+)
 _SHORTEST = re.compile(r"shortestPath\(\(s:(\w+) \{objectid: '([^']+)'\}\)-\[:([\w|]+)\*1\.\.(\d+)\]->\(t:(\w+)\)\)")
 
 
+_NODE = re.compile(r"MATCH \(n \{objectid: '([^']+)'\}\) RETURN n")
+_VIEW_HOP = re.compile(r"-\[:(\w+)\]->\(n\d+ \{objectid: '([^']+)'\}\)")
+_INBOUND = re.compile(r"MATCH p=\(a\)-\[:([\w|]+)\]->\(n \{objectid: '([^']+)'\}\)")
+_OUTBOUND = re.compile(r"MATCH p=\(n \{objectid: '([^']+)'\}\)-\[:([\w|]+)\]->\(b\)")
 _FIRST_HOPS = re.compile(r"MATCH p=\(s:User \{objectid: '([^']+)'\}\)-\[:([\w|]+)\]->\(m\)")
 
 
@@ -221,6 +251,43 @@ class DemoExecutor:
             )
             return _graph(nodes[:limit])
 
+        if m := _NODE.match(query):
+            node = g.by_oid.get(m.group(1))
+            return _graph([node] if node else [])
+
+        if query.startswith("MATCH p=(n0 {objectid: "):
+            hops = _VIEW_HOP.findall(query)
+            first = g.by_oid.get(re.match(r"MATCH p=\(n0 \{objectid: '([^']+)'\}\)", query).group(1))
+            if first is None:
+                return _graph([])
+            nodes, edges, cur = [first], [], first
+            for kind, oid in hops:
+                nxt = g.by_oid.get(oid)
+                if nxt is None or (kind, nxt.id) not in g.out.get(cur.id, []):
+                    return _graph([])
+                nodes.append(nxt)
+                edges.append((cur.id, kind, nxt.id))
+                cur = nxt
+            return _graph(nodes, edges)
+
+        if m := _INBOUND.match(query):
+            rels, oid = m.groups()
+            node = g.by_oid.get(oid)
+            if node is None:
+                return _graph([])
+            allowed = set(rels.split("|"))
+            edges = [(src, k, node.id) for k, src in g.inbound.get(node.id, ()) if k in allowed][:limit]
+            return _graph([node, *(g.nodes[s] for s, _, _ in edges)], edges)
+
+        if m := _OUTBOUND.match(query):
+            oid, rels = m.groups()
+            node = g.by_oid.get(oid)
+            if node is None:
+                return _graph([])
+            allowed = set(rels.split("|"))
+            edges = [(node.id, k, dst) for k, dst in g.out.get(node.id, ()) if k in allowed][:limit]
+            return _graph([node, *(g.nodes[d] for _, _, d in edges)], edges)
+
         if m := _FIRST_HOPS.match(query):
             oid, rels = m.groups()
             start = g.by_oid.get(oid)
@@ -229,6 +296,41 @@ class DemoExecutor:
             allowed = set(rels.split("|"))
             edges = [(start.id, kind, dst) for kind, dst in g.out.get(start.id, ()) if kind in allowed][:limit]
             return _graph([start, *(g.nodes[d] for _, _, d in edges)], edges)
+
+        if m := _ALL_SHORTEST.search(query):
+            label, oid, rels, max_hops, _target = m.groups()
+            start = g.by_oid.get(oid)
+            if start is None or start.kind != label:
+                return _graph([])
+            allowed, depth = set(rels.split("|")), {start.id: 0}
+            parents: dict[int, list[tuple[int, str]]] = {}
+            frontier = [start.id]
+            while frontier and depth[frontier[0]] < int(max_hops):
+                nxt_frontier = []
+                for cur in frontier:
+                    if g.nodes[cur].tier_zero and cur != start.id:
+                        continue  # shortest paths stop at their target
+                    for kind, nxt in g.out.get(cur, ()):
+                        if kind not in allowed:
+                            continue
+                        if nxt not in depth:
+                            depth[nxt] = depth[cur] + 1
+                            nxt_frontier.append(nxt)
+                        if depth[nxt] == depth[cur] + 1:
+                            parents.setdefault(nxt, []).append((cur, kind))
+                frontier = nxt_frontier
+            nodes, edges, budget = {start.id: start}, set(), limit
+            for target in sorted(n for n in depth if n != start.id and g.nodes[n].tier_zero):
+                stack = [target]
+                while stack and budget > 0:
+                    cur = stack.pop()
+                    nodes[cur] = g.nodes[cur]
+                    for prev, kind in parents.get(cur, ()):
+                        if (prev, kind, cur) not in edges:
+                            edges.add((prev, kind, cur))
+                            stack.append(prev)
+                budget -= 1
+            return _graph(list(nodes.values()), sorted(edges))
 
         if m := _SHORTEST.search(query):
             label, oid, rels, max_hops, target = m.groups()

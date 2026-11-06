@@ -191,5 +191,6 @@ catalogue and the result of `bloodhound_status`.
 3. Decide on scheduling: use Hunter if refresh tokens work, otherwise the REST
    backend with an API token.
 4. Enrich the weakest links with BHE finding IDs and remediation text through
-   the typed tools, and add Explore links.
+   the typed tools, and add Explore links. The agent fleet ([FLEET.md](FLEET.md))
+   does this through `call_bloodhound_tool` once the typed tools are known.
 5. Extend to Azure/Entra.
