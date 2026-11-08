@@ -136,6 +136,40 @@ async def test_falls_back_to_shortest_path_when_all_shortest_is_rejected():
     assert by_start(result)["IT SUPPORT"].paths == 1  # one path per target: the alternative is not visible
 
 
+async def test_timeouts_affect_only_the_slow_start_node(monkeypatch):
+    import asyncio
+
+    import goodhound_enterprise.source as src
+    from goodhound_enterprise.backends.base import RetryableQueryError
+
+    nodes = build_demo_graph().nodes.values()
+    it_support = next(n for n in nodes if n.name.startswith("IT SUPPORT@")).objectid
+    developers = next(n for n in nodes if n.name.startswith("DEVELOPERS@")).objectid
+
+    class Slow(DemoExecutor):
+        async def run(self, query):
+            if it_support in query and "allShortestPaths" in query:
+                raise RetryableQueryError("query_timed_out")
+            if developers in query and "shortest" in query.lower():
+                raise RetryableQueryError("query_timed_out")
+            return await super().run(query)
+
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(src.asyncio, "sleep", lambda _: real_sleep(0))
+    executor = Slow()
+    source = CypherGraphSource(executor, Settings(rate_limit=0, session_half_life_days=0), retries=2)
+    result = await analyse(source, tenant="demo")
+    rows = by_start(result)
+    # The slow group fell back to one path per target; everyone else kept allShortestPaths.
+    assert result.single_path_fallbacks == [it_support]
+    assert rows["IT SUPPORT"].paths == 1 and rows["SERVER ADMINS"].reach > 0
+    assert sum("allShortestPaths" in q for q in executor.log) > 1
+    # The group whose every query timed out is skipped and reported, not fatal.
+    assert developers in result.skipped_start_nodes and "DEVELOPERS" not in rows
+    summary = dict(report._summary(result))
+    assert summary["Start nodes skipped (query failed)"].startswith("1:")
+
+
 async def test_include_users_finds_direct_user_paths_but_not_inherited_ones():
     result, _ = await run_demo(include_users=True)
     user_rows = [r for r in result.all_paths if r.start_label == "User"]
@@ -164,6 +198,49 @@ async def test_fixed_path_shows_as_resolved_in_history(tmp_path):
     assert [start for start, _ in d2.resolved] == ["DOMAIN USERS@CONTOSO.LOCAL"]
     assert d2.previous_exposure == first.exposure and second.exposure < first.exposure
     assert second.users_with_path < first.users_with_path
+
+
+async def test_skipped_start_node_is_not_reported_as_resolved(tmp_path):
+    db = tmp_path / "h.db"
+    first, _ = await run_demo()
+    history.record(first, db)
+    du = f"{DOMAIN_SID}-513"
+    second, _ = await run_demo()
+    # Pretend Domain Users' query failed this run: its path is missing but was not re-checked.
+    second.all_paths = [r for r in second.all_paths if r.path.start.objectid != du]
+    second.skipped_start_nodes = [du]
+    d2 = history.record(second, db)
+    assert d2.resolved == []
+
+
+async def test_rejected_path_query_aborts_instead_of_skipping():
+    from goodhound_enterprise.backends.base import QueryError
+
+    class Rejecting(DemoExecutor):
+        async def run(self, query):
+            if f"{DOMAIN_SID}-513" in query and "shortest" in query.lower():
+                raise QueryError("rejected by the validator")
+            return await super().run(query)
+
+    source = CypherGraphSource(Rejecting(), Settings(rate_limit=0, session_half_life_days=0))
+    with pytest.raises(QueryError, match="rejected"):
+        await analyse(source, tenant="demo")
+
+
+async def test_many_failing_start_nodes_abort_the_run(monkeypatch):
+    import goodhound_enterprise.analysis as analysis_mod
+    from goodhound_enterprise.backends.base import QueryError, RetryableQueryError
+
+    class Down(DemoExecutor):
+        async def run(self, query):
+            if "shortest" in query.lower():
+                raise RetryableQueryError("query_timed_out")
+            return await super().run(query)
+
+    monkeypatch.setattr(analysis_mod, "MAX_SKIPPED_START_NODES", 2)
+    source = CypherGraphSource(Down(), Settings(rate_limit=0, session_half_life_days=0), retries=1)
+    with pytest.raises(QueryError, match="aborting"):
+        await analyse(source, tenant="demo")
 
 
 async def test_history_upgrades_an_old_database(tmp_path):

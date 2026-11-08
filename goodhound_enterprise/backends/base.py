@@ -9,6 +9,10 @@ class QueryError(RuntimeError):
     """The backend rejected or failed a query (not retried)."""
 
 
+class RetryableQueryError(QueryError):
+    """The backend failed a query but says a retry may succeed (e.g. Hunter's ``query_timed_out``)."""
+
+
 class CypherExecutor(Protocol):
     """Runs one read-only Cypher query and returns the raw (JSON-like) result."""
 

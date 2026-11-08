@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from . import cypher
-from .backends.base import CypherExecutor, QueryError, RateLimiter
+from .backends.base import CypherExecutor, QueryError, RateLimiter, RetryableQueryError
 from .config import Settings
 from .graph import Edge, Graph, Node, parse_graph
 
@@ -24,20 +24,28 @@ class CypherGraphSource:
         self._limiter = RateLimiter(settings.rate_limit)
         self.queries_sent = 0
         self._all_shortest_unsupported = False
+        self.single_path_fallbacks: list[str] = []
 
-    async def query(self, query: str) -> Graph:
+    async def query(self, query: str, *, retries: int | None = None) -> Graph:
+        retries = retries or self.retries
         cypher.assert_hunter_safe(query, self.settings.max_hops)
         async with self._sem:
-            for attempt in range(1, self.retries + 1):
+            for attempt in range(1, retries + 1):
                 await self._limiter.wait()
                 self.queries_sent += 1
                 try:
                     raw: Any = await self.executor.run(query)
                     return parse_graph(raw, self.settings.target_label)
+                except RetryableQueryError as exc:
+                    if attempt == retries:
+                        raise
+                    backoff = 2**attempt
+                    log.warning("Query failed (%s); retrying in %ss", str(exc)[:200], backoff)
+                    await asyncio.sleep(backoff)
                 except QueryError:
                     raise
                 except Exception as exc:  # transport hiccup, 429, timeout...
-                    if attempt == self.retries:
+                    if attempt == retries:
                         raise
                     backoff = 2**attempt
                     log.warning("Query failed (%s); retrying in %ss", exc, backoff)
@@ -84,17 +92,30 @@ class CypherGraphSource:
         """Union of the shortest paths from ``start`` to the reachable Tier Zero nodes.
 
         Prefers ``allShortestPaths`` (every equally short alternative, which the reach
-        probability needs) and falls back to ``shortestPath`` (one path per target) for good
-        if the backend rejects it.
+        probability needs) and falls back to ``shortestPath`` (one path per target): for good
+        if the backend rejects it, or for this start node only if it times out.
         """
         if self.settings.all_shortest_paths and not self._all_shortest_unsupported:
             query = cypher.all_shortest_paths_from(self.settings, start_label, start.objectid, max_hops)
             try:
-                return await self.query(query)
+                # A timed-out allShortestPaths rarely succeeds on retry; shortestPath is cheaper.
+                return await self.query(query, retries=1)
+            except RetryableQueryError as exc:
+                self._single_path_fallback(start, exc)
             except QueryError as exc:
                 self._all_shortest_unsupported = True
                 log.warning("allShortestPaths rejected (%s); falling back to shortestPath", str(exc)[:200])
+            except Exception as exc:  # client-side timeout or transport error
+                self._single_path_fallback(start, exc)
         return await self.query(cypher.shortest_paths_from(self.settings, start_label, start.objectid, max_hops))
+
+    def _single_path_fallback(self, start: Node, exc: BaseException) -> None:
+        self.single_path_fallbacks.append(start.objectid)
+        log.warning(
+            "allShortestPaths failed for %s (%s); using shortestPath for this start node",
+            start.name or start.objectid,
+            str(exc)[:120],
+        )
 
     async def first_hops(self, user: Node) -> list[tuple[Edge, Node]]:
         graph = await self.query(cypher.first_hops(self.settings, user.objectid))

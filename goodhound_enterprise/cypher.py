@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Sequence
 
-from .config import HUNTER_MAX_HOPS, HUNTER_MAX_LIMIT, Settings
+from .config import HUNTER_MAX_HOPS, HUNTER_MAX_LIMIT, HUNTER_MAX_LIST, Settings
 
 
 class UnsafeQueryError(ValueError):
@@ -117,12 +117,19 @@ def member_count(settings: Settings, group_objectid: str) -> str:
     )
 
 
+def in_lists(expr: str, values: Sequence[str]) -> str:
+    """``expr IN [...]`` split into OR-ed lists of at most ``HUNTER_MAX_LIST`` items each."""
+    chunks = [values[i : i + HUNTER_MAX_LIST] for i in range(0, len(values), HUNTER_MAX_LIST)] or [[]]
+    parts = [f"{expr} IN [{', '.join(literal(v) for v in chunk)}]" for chunk in chunks]
+    return parts[0] if len(parts) == 1 else "(" + " OR ".join(parts) + ")"
+
+
 def unique_members(settings: Settings, group_objectids: Sequence[str]) -> str:
     tz = _label(settings.target_label)
-    ids = ", ".join(literal(i) for i in group_objectids)
     return (
         f"MATCH (u:User)-[:MemberOf*1..{settings.max_hops}]->(g:Group) "
-        f"WHERE g.objectid IN [{ids}] AND u.enabled = true AND NOT u:{tz}{_domain_clause('u', settings)} "
+        f"WHERE {in_lists('g.objectid', list(group_objectids))} AND u.enabled = true "
+        f"AND NOT u:{tz}{_domain_clause('u', settings)} "
         "RETURN count(DISTINCT u) AS users LIMIT 1"
     )
 
@@ -168,6 +175,9 @@ _WRITE_RE = re.compile(r"\b(CREATE|MERGE|SET|DELETE|DETACH|REMOVE|DROP|LOAD\s+CS
 _COLLECT_RE = re.compile(r"\bcollect\s*\(", re.IGNORECASE)
 
 
+_LIST_RE = re.compile(r"\[([^\[\]]*,[^\[\]]*)\]")
+
+
 def assert_hunter_safe(query: str, max_hops: int = HUNTER_MAX_HOPS) -> None:
     """Raise ``UnsafeQueryError`` if ``query`` breaks a documented Hunter rule.
 
@@ -187,3 +197,6 @@ def assert_hunter_safe(query: str, max_hops: int = HUNTER_MAX_HOPS) -> None:
         raise UnsafeQueryError(f"Query must be read-only: {query}")
     if _COLLECT_RE.search(stripped):
         raise UnsafeQueryError(f"collect() is not allowed by Hunter: {query}")
+    for lm in _LIST_RE.finditer(stripped):
+        if lm.group(1).count(",") + 1 > HUNTER_MAX_LIST:
+            raise UnsafeQueryError(f"List literals may hold at most {HUNTER_MAX_LIST} items: {query[:200]}")

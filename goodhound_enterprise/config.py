@@ -19,6 +19,8 @@ from pathlib import Path
 HUNTER_MAX_HOPS = 10
 #: Hunter requires a terminal literal ``LIMIT`` between 1 and this value.
 HUNTER_MAX_LIMIT = 100
+#: Hunter rejects list literals with more items than this ("can materialize an unbounded collection").
+HUNTER_MAX_LIST = 100
 
 # Cost per edge kind.  0 = "free" (structural), 1 = direct abuse,
 # 2 = needs extra tooling or tradecraft, 3 = needs to wait for / steal a session.

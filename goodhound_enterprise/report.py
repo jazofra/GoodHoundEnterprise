@@ -52,6 +52,20 @@ def _summary(r: AnalysisResult) -> list[tuple[str, str]]:
         ]
         if _probability_model(r) and h.get("previous_exposure") is not None:
             rows.append(("Exposure at previous run", f"{h['previous_exposure']}%"))
+    if r.skipped_start_nodes:
+        rows.append(
+            (
+                "Start nodes skipped (query failed)",
+                f"{len(r.skipped_start_nodes)}: totals and exposure are a lower bound",
+            )
+        )
+    if r.single_path_fallbacks:
+        rows.append(
+            (
+                "Start nodes with shortestPath only",
+                f"{len(r.single_path_fallbacks)}: allShortestPaths timed out, so their reach may be underestimated",
+            )
+        )
     rows.append(("Queries sent", str(r.queries_sent)))
     return rows
 
@@ -219,6 +233,8 @@ def to_json(r: AnalysisResult) -> str:
         "risk_model": r.settings.risk_model,
         "exposure": r.exposure,
         "exposure_is_estimate": r.exposure_is_estimate,
+        "skipped_start_nodes": r.skipped_start_nodes,
+        "single_path_fallbacks": r.single_path_fallbacks,
         "settings": {
             "target_label": r.settings.target_label,
             "max_hops": r.settings.max_hops,

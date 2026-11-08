@@ -287,7 +287,7 @@ class Gateway:
             arguments = json.loads(args["arguments_json"] or "{}")
             if not isinstance(arguments, dict):
                 raise ValueError("arguments_json must be a JSON object")
-            result = await self.hunter.client.call_tool(name, arguments)
+            result = await self.hunter.call_tool(name, arguments)
             from ..backends.hunter import _result_payload
 
             payload = _result_payload(result)

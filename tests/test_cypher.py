@@ -84,3 +84,17 @@ def test_load_settings_from_toml(tmp_path):
     assert s.max_hops == 6 and s.domain_sid == "S-1"
     assert s.cost("HasSession") == 5 and s.cost("CustomEdge") == 2
     assert "MemberOf" in s.edge_costs  # defaults kept unless replace_default_edges
+
+
+def test_long_id_lists_are_split_into_hunter_sized_chunks(settings):
+    ids = [f"S-1-5-21-1-2-3-{i}" for i in range(250)]
+    q = cypher.unique_members(settings, ids)
+    cypher.assert_hunter_safe(q)
+    assert q.count("g.objectid IN [") == 3 and " OR " in q
+    assert all(f"'{i}'" in q for i in ids)
+
+
+def test_list_literals_over_100_items_are_rejected():
+    items = ", ".join(f"'{i}'" for i in range(101))
+    with pytest.raises(cypher.UnsafeQueryError, match="at most 100"):
+        cypher.assert_hunter_safe(f"MATCH (g:Group) WHERE g.objectid IN [{items}] RETURN count(g) AS n LIMIT 1")

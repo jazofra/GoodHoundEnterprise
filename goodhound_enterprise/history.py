@@ -160,7 +160,20 @@ def record(result: AnalysisResult, path: str | Path) -> HistoryDelta:
                     row.paths,
                 ),
             )
-        resolved_uids = previous_uids - current
+        # A path whose start node was skipped this run (query failed) was not re-checked, so it is not resolved.
+        skipped = set(result.skipped_start_nodes)
+        unchecked = (
+            {
+                r[0]
+                for r in db.execute(
+                    "SELECT uid, start_objectid FROM paths WHERE tenant = ?", (result.tenant,)
+                ).fetchall()
+                if r[1] in skipped
+            }
+            if skipped
+            else set()
+        )
+        resolved_uids = previous_uids - current - unchecked
         resolved: list[tuple[str, str]] = []
         for uid in sorted(resolved_uids):
             r = db.execute(

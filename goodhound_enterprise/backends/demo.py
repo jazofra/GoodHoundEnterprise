@@ -368,7 +368,7 @@ class DemoExecutor:
             return _graph([], literals=[("members", len(self._members({group.id}, 10)))])
 
         if "AS users" in query:
-            ids = re.findall(r"'([^']+)'", re.search(r"IN \[(.*?)\]", query).group(1))
+            ids = [i for lst in re.findall(r"IN \[(.*?)\]", query) for i in re.findall(r"'([^']+)'", lst)]
             group_ids = {g.by_oid[i].id for i in ids if i in g.by_oid}
             return _graph([], literals=[("users", len(self._members(group_ids, 10)))])
 
