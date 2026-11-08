@@ -25,7 +25,8 @@ from typing import Any
 from .. import cypher
 from ..analysis import AnalysisResult
 from ..backends.base import QueryError
-from ..graph import Graph, Node, best_path
+from ..graph import Graph, Node
+from ..risk import RiskContext
 from ..source import CypherGraphSource
 
 MAX_RESULT_CHARS = 12_000
@@ -156,7 +157,9 @@ class Gateway:
     # ------------------------------------------------------------------ tools
 
     def _build_tools(self) -> list[Tool]:
-        attack_edges = [e for e in self.source.settings.traversable_edges if e != "MemberOf"]
+        settings = self.source.settings
+        ctx = RiskContext(settings, self.result.generated_at)
+        attack_edges = [e for e in settings.traversable_edges if e != "MemberOf"]
         oid = _str("objectid (SID or GUID) exactly as given in the task or a previous tool result")
 
         async def get_object(args: dict[str, Any]) -> Any:
@@ -201,16 +204,20 @@ class Gateway:
                     "start_objectid": r.path.start.objectid,
                     "users": r.members,
                     "risk": r.risk,
-                    "path": r.path.text,
+                    "reach_probability": round(r.reach, 4),
+                    "reach_without_this_link": round(r.graph.reach(settings, exclude=[key]).probability, 4)
+                    if r.graph is not None
+                    else None,
+                    "most_likely_path": r.path.text,
                 }
                 for r in self.result.all_paths
-                if any((h.source.objectid, h.kind, h.target.objectid) == key for h in r.path.hops)
+                if (r.graph is not None and key in r.graph.keys)
+                or any((h.source.objectid, h.kind, h.target.objectid) == key for h in r.path.hops)
             ]
-            return {"paths": rows[:MAX_LIST_ITEMS], "count": len(rows)}
+            return {"start_nodes": rows[:MAX_LIST_ITEMS], "count": len(rows)}
 
         async def path_without_link(args: dict[str, Any]) -> Any:
             start = await self._node(args["start_objectid"])
-            settings = self.source.settings
             try:
                 graph = await self._query(cypher.all_shortest_paths_from(settings, start.kind, start.objectid))
                 searched = "all shortest paths"
@@ -218,17 +225,22 @@ class Gateway:
                 graph = await self._query(cypher.shortest_paths_from(settings, start.kind, start.objectid))
                 searched = "one shortest path per Tier Zero target"
             removed = (args["source_objectid"], args["kind"], args["target_objectid"])
+            before = ctx.build(graph, start.objectid)
+            reach_before = before.reach(settings).probability if before else 0.0
 
             def keep(edge) -> bool:
                 src, dst = graph.nodes.get(edge.source), graph.nodes.get(edge.target)
                 return not (src and dst and (src.objectid, edge.kind, dst.objectid) == removed)
 
             graph.edges = [e for e in graph.edges if keep(e)]
-            path = best_path(graph, start.objectid, self.source.settings.cost)
+            after = ctx.build(graph, start.objectid)
+            path = after.best_path(ctx.objective) if after else None
             return {
-                "remaining_path": path.text if path else None,
+                "reach_probability_before": round(reach_before, 4),
+                "reach_probability_after": round(after.reach(settings).probability, 4) if after else 0.0,
+                "remaining_most_likely_path": path.text if path else None,
+                "remaining_path_probability": round(path.probability, 4) if path else None,
                 "hops": path.length if path else None,
-                "cost": path.cost if path else None,
                 "searched": searched,
                 "note": "Only paths of the minimal hop length are searched; a longer remaining path would not show.",
             }
@@ -323,15 +335,15 @@ class Gateway:
             ),
             Tool(
                 "paths_using_link",
-                "Which analysed attack paths use a given relationship, with users exposed "
-                "and risk (from this run's results, no query).",
+                "Which analysed start nodes depend on a relationship: their users, risk, and reach probability "
+                "now and without this relationship (from this run's results, no query).",
                 edge,
                 paths_using_link,
             ),
             Tool(
                 "path_without_link",
-                "Re-run the shortest-path search from a start object, ignoring one "
-                "relationship, to see what path would remain after fixing it.",
+                "Re-run the shortest-path search from a start object without one relationship: reach "
+                "probability before and after, and the most likely path that would remain after fixing it.",
                 {"start_objectid": oid, **edge},
                 path_without_link,
             ),

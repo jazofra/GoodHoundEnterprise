@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import math
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -182,6 +183,9 @@ class Hop:
     source: Node
     kind: str
     target: Node
+    #: Effective success probability of this hop (see Settings.probability).
+    probability: float = field(default=1.0, compare=False)
+    last_seen: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -193,6 +197,16 @@ class AttackPath:
     @property
     def length(self) -> int:
         return len(self.hops)
+
+    @property
+    def probability(self) -> float:
+        """Chance that every hop of this one path works (product of hop probabilities)."""
+        return math.prod(h.probability for h in self.hops)
+
+    @property
+    def actions(self) -> int:
+        """Hops that need an attacker action (probability below 1)."""
+        return sum(1 for h in self.hops if h.probability < 1.0)
 
     @property
     def target(self) -> Node:

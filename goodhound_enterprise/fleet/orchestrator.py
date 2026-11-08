@@ -70,6 +70,29 @@ def _edge_line(src_name: str, src: str, kind: str, dst_name: str, dst: str) -> s
     return f"- {src_name} [{src}] -{kind}-> {dst_name} [{dst}]"
 
 
+def _link_impact(link: WeakLink, result: AnalysisResult) -> str:
+    if link.risk_reduction is not None:
+        return (
+            f"{link.paths} start node(s) with {link.users_exposed} distinct enabled non-Tier Zero users depend on "
+            f"this relationship. Removing it lowers the tenant's probability-weighted exposure by "
+            f"{link.risk_reduction} points (of {result.exposure}%), counting each user once at their best "
+            "remaining path."
+        )
+    return (
+        f"this relationship appears in {link.paths} of {result.total_paths} attack paths to Tier Zero "
+        f"({link.percentage}%), whose start groups have {link.users_exposed} enabled non-Tier Zero members in "
+        "total (users in several groups counted more than once)."
+    )
+
+
+def _path_impact(row: PathResult) -> str:
+    return (
+        f"Hops: {row.path.length} ({row.path.actions} needing attacker action). This path's success probability: "
+        f"{row.path.probability:.1%}; chance that at least one of the {row.paths_label} visible path(s) from this "
+        f"start works: {row.reach:.1%}."
+    )
+
+
 def link_task(index: int, link: WeakLink, result: AnalysisResult) -> Task:
     h = link.hop
     item = f"link-{index}"
@@ -78,9 +101,7 @@ Relationship to investigate:
 {_edge_line(h.source.display, h.source.objectid, h.kind, h.target.display, h.target.objectid)}
 Source kind: {h.source.kind}. Target kind: {h.target.kind}. Target is Tier Zero: {h.target.tier_zero}.
 
-From the analysis run on {result.generated_at:%Y-%m-%d}: this relationship appears in {link.paths} of
-{result.total_paths} attack paths to Tier Zero ({link.percentage}%), whose start groups have
-{link.users_exposed} enabled non-Tier Zero members in total (users in several groups counted more than once).
+From the analysis run on {result.generated_at:%Y-%m-%d}: {_link_impact(link, result)}
 Cypher that renders it: {link.query}
 
 Produce the remediation card for this relationship."""
@@ -99,8 +120,8 @@ Attack path to validate, starting at {row.path.start.display} [{row.path.start.o
 {lines}
 
 From the analysis run on {result.generated_at:%Y-%m-%d}: {row.members} enabled non-Tier Zero users
-({row.percentage}% of {result.total_enabled_users}) can walk this path. Hops: {row.path.length},
-exploit cost: {row.path.cost}, risk score: {row.risk} (rank #{index} by risk).
+({row.percentage}% of {result.total_enabled_users}) start here. {_path_impact(row)} Risk: {row.risk}
+(rank #{index}).
 Cypher that renders it: {row.query}
 
 Produce the remediation card for this path."""
@@ -137,13 +158,26 @@ def synthesis_input(result: AnalysisResult, cards: list[Card]) -> str:
             "enabled_non_tier_zero_users": result.total_enabled_users,
             "users_with_a_path": result.users_with_path,
             "percent_with_a_path": result.percentage_with_path,
-            "paths": result.total_paths,
+            "risk_model": result.settings.risk_model,
+            "probability_weighted_exposure_percent": result.exposure,
+            "start_nodes_with_a_path": result.total_paths,
             "busiest_paths": [
-                {"start": p.path.start.display, "users": p.members, "risk": p.risk, "path": p.path.text}
+                {
+                    "start": p.path.start.display,
+                    "users": p.members,
+                    "risk": p.risk,
+                    "reach_probability": round(p.reach, 3),
+                    "most_likely_path": p.path.text,
+                }
                 for p in result.busiest
             ],
             "weakest_links": [
-                {"link": w.text, "paths": w.paths, "percent_of_paths": w.percentage, "users_exposed": w.users_exposed}
+                {
+                    "link": w.text,
+                    "start_nodes": w.paths,
+                    "distinct_users": w.users_exposed,
+                    "exposure_removed_points": w.risk_reduction,
+                }
                 for w in result.weakest
             ],
         },

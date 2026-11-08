@@ -136,7 +136,7 @@ def _add_run_args(run: argparse.ArgumentParser, *, default_formats: str) -> None
     )
     o.add_argument("-d", "--output-dir", type=Path, default=Path("ghe-reports"))
     o.add_argument("-r", "--results", type=int, default=5, help="Rows in the busiest paths / weakest links tables")
-    o.add_argument("--sort", choices=("risk", "users", "hops"), default="risk")
+    o.add_argument("--sort", choices=("risk", "users", "hops", "probability"), default="risk")
     q = run.add_argument_group("Analysis")
     q.add_argument("-c", "--config", type=Path, help="TOML file with edge costs and settings")
     q.add_argument("--max-hops", type=int, help=f"Max path length (1-{HUNTER_MAX_HOPS}, Hunter limit)")
@@ -147,6 +147,37 @@ def _add_run_args(run: argparse.ArgumentParser, *, default_formats: str) -> None
         action="store_true",
         default=None,
         help="Also search from every enabled user (slow on large tenants)",
+    )
+    q.add_argument(
+        "--risk-model",
+        choices=("probability", "goodhound"),
+        help="probability (default): reach probability x users, links ranked by exposure removed; "
+        "goodhound: the original cost formula",
+    )
+    q.add_argument(
+        "--detection",
+        type=float,
+        dest="per_action_detection",
+        help="Chance (0-1) that each attacker action is detected and stopped (default 0.05)",
+    )
+    q.add_argument(
+        "--session-half-life",
+        type=float,
+        dest="session_half_life_days",
+        help="Days after which a session's probability halves (default 14, 0 = no decay)",
+    )
+    q.add_argument(
+        "--reuse-suffixes",
+        action="store_true",
+        default=None,
+        help="Fewer queries: intermediate groups reuse another group's path (reach may be underestimated)",
+    )
+    q.add_argument(
+        "--one-path-per-target",
+        action="store_false",
+        default=None,
+        dest="all_shortest_paths",
+        help="Use shortestPath instead of allShortestPaths (fewer alternatives counted)",
     )
     q.add_argument("--concurrency", type=int, help="Parallel queries (default 4)")
     q.add_argument("--rate-limit", type=float, help="Max queries per second (default 10)")
@@ -213,6 +244,11 @@ def _settings(args: argparse.Namespace):
         include_users=args.include_users,
         concurrency=args.concurrency,
         rate_limit=args.rate_limit,
+        risk_model=args.risk_model,
+        per_action_detection=args.per_action_detection,
+        session_half_life_days=args.session_half_life_days,
+        reuse_suffixes=args.reuse_suffixes,
+        all_shortest_paths=args.all_shortest_paths,
     )
 
 
@@ -264,13 +300,11 @@ async def cmd_fleet(args: argparse.Namespace) -> int:
         token_budget=args.token_budget,
         fallbacks=not args.no_fallbacks,
     )
-    client = None
     if not args.dry_run:
-        try:
+        try:  # fail before the (long) analysis, not after it
             from anthropic import AsyncAnthropic
         except ImportError:
             raise SystemExit("The fleet needs the Anthropic SDK: pip install 'goodhound-enterprise[fleet]'") from None
-        client = AsyncAnthropic()
     async with open_executor(args) as executor:
         source = CypherGraphSource(executor, settings)
         results = max(args.results, args.links, args.paths)
@@ -287,6 +321,7 @@ async def cmd_fleet(args: argparse.Namespace) -> int:
             return 0
         hunter = executor if getattr(executor, "name", "") == "hunter" else None
         gateway = Gateway(source, result, hunter)
+        client = AsyncAnthropic()
         try:
             fleet_result = await run_fleet(gateway, client, cfg, progress)
         finally:

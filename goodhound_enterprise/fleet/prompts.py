@@ -56,9 +56,10 @@ by analyst agents, each already re-checked in code ("verified": true/false/null 
 Write the remediation plan for IT operations and security leadership:
 - An executive summary of 3-5 sentences: exposure today, the few changes that remove most of it, and
   what is uncertain.
-- At most 8 prioritised actions, highest impact first. Merge cards that describe the same change. Each
-  action names the change, the likely owner (only as stated in the cards), what it breaks (paths/users
-  from the input), its operational risk, and the card items it is based on.
+- At most 8 prioritised actions, highest impact first: order by the exposure each removes
+  ("exposure_removed_points" when present), not by how many paths mention it. Merge cards that describe
+  the same change. Each action names the change, the likely owner (only as stated in the cards), its impact
+  (exposure points / distinct users from the input), its operational risk, and the card items it is based on.
 - Caveats: cards that failed verification or were judged false positives or already fixed, and anything
   the analysts could not determine.
 

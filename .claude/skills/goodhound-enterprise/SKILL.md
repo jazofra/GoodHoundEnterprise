@@ -67,47 +67,63 @@ AllowedToAct, AddAllowedToAct, HasSIDHistory, WriteSPN, AddKeyCredentialLink,
 DCSync, Contains, GPLink, and the ADCS ESC edges.
 
 ```cypher
-MATCH p=shortestPath((s:Group {objectid: '<sid>'})-[:MemberOf|AdminTo|HasSession|...*1..10]->(t:Tag_Tier_Zero)) RETURN p LIMIT 100
+MATCH p=allShortestPaths((s:Group {objectid: '<sid>'})-[:MemberOf|AdminTo|HasSession|...*1..10]->(t:Tag_Tier_Zero)) RETURN p LIMIT 100
 ```
 
-From the returned paths, keep the fewest hops, then the lowest **exploit cost**.
-Any group that sits in the middle of a shortest path inherits the rest of that
-path, so you do not need to query it again.
+If `allShortestPaths` is rejected, use `shortestPath` (one path per target).
 
-| Cost | Edges |
-|---|---|
-| 0 | MemberOf, Contains, GPLink, CanRDP |
-| 1 | AdminTo, ACL abuse (GenericAll/Write, WriteDacl, WriteOwner, Owns, AllExtendedRights, AddMember, AddSelf, ForceChangePassword, WriteSPN), LAPS/gMSA read, delegation, CanPSRemote, ExecuteDCOM, SQLAdmin, HasSIDHistory |
-| 2 | AddKeyCredentialLink, DCSync, ADCS ESC*, GoldenCert, CoerceToTGT, ACL abuse on a Domain object |
-| 3 | HasSession, NTLM coerce-and-relay |
+**Probabilities** (full table and reasoning in `docs/RISK_MODEL.md`). Each hop gets a success
+probability:
 
-**Reach.** For each start group, count its enabled non-Tier Zero members,
-including nested members:
+- MemberOf and Contains: 1.0. GPLink: 0.95.
+- Direct ACL abuse, AdminTo, LAPS/gMSA reads, DCSync: 0.9–0.95.
+- Delegation, shadow credentials, most ADCS ESCs: 0.7–0.85.
+- HasSession: 0.6, halving every 14 days since the session was last seen.
+- WriteSPN and NTLM relays: 0.5.
+- CanRDP, CanPSRemote, ExecuteDCOM: 0.4, because a non-admin still needs local privilege escalation.
+
+Multiply every non-structural hop by 0.95, the chance the action is not detected.
+
+- **Path probability** = the product over its hops. Show the most likely path, not the shortest.
+- **Reach** = the chance that at least one returned path works, treating hops as independent. Two
+  independent routes p₁ and p₂ give 1 − (1 − p₁)(1 − p₂). A hop shared by every route caps reach at
+  that hop's probability.
+
+**Members.** For each start group, count its enabled non-Tier Zero members, including nested members:
 
 ```cypher
 MATCH (u:User)-[:MemberOf*1..10]->(g:Group {objectid: '<sid>'}) WHERE u.enabled = true AND NOT u:Tag_Tier_Zero RETURN count(DISTINCT u) AS members LIMIT 1
 ```
 
-**Risk score:** `round((1 - cost / 31) * pct_users, 1)`, where `pct_users` =
-members / population × 100, and 31 = 10 hops × max cost 3 + 1. The ceiling is fixed,
-so scores are comparable between runs.
+**Risk** = `100 × reach × members / population`: the expected % of users who reach Tier Zero through
+that start node.
 
-**Weakest links.** Count how many of the paths each single relationship
-(source, edge, target) appears in. The top entries are the choke points: removing
-one breaks every path that uses it.
+**Exposure** (the headline) = expected % of users who reach Tier Zero, each user counted once at their
+best group:
+
+1. Sort the distinct reach values in descending order.
+2. For each level, count the distinct users in all groups at or above it, using one
+   `count(DISTINCT u)` over `g.objectid IN [...]`.
+3. Sum `count × (level − next level)`, then divide by the population.
+
+**Weakest links** = the relationships whose removal lowers exposure the most. Recompute each affected
+group's reach without the link, then recompute exposure the same way. Users who keep another route
+don't count. Do not rank by how many paths contain a link: that ranks a link behind a path to 100% of
+users below a session link shared by a few small groups.
 
 ## 4. Report
 
 Produce three tables, then a plan:
 
-1. **Grand totals:** population, users with a path (and %), number of start nodes
-   with a path, and the change since the previous report if the user has one.
-2. **Busiest paths** (top 5 by risk): start node, users, % users, hops, cost, risk,
+1. **Grand totals:** population, users with a path (and %), probability-weighted exposure, number
+   of start nodes with a path, and the change since the previous report if the user has one.
+2. **Busiest paths** (top 5 by risk): start node, users, % users, hops, visible paths, path
+   probability, reach, risk,
    the path as `A - Edge -> B - Edge -> C`, and a Cypher query that renders it:
    `MATCH p=(n0 {objectid:'..'})-[:Edge]->(n1 {objectid:'..'}) RETURN p LIMIT 1`.
    Include Hunter's Explore link when a typed tool returns one.
-3. **Weakest links** (top 5): the relationship, number of paths, % of paths, and
-   users exposed.
+3. **Weakest links** (top 5): the relationship, start nodes that depend on it, distinct users, and
+   exposure removed (points).
 
 Then a **remediation plan** in priority order. For every weakest link, say what to
 change (remove the ACE, the membership, the session or the local admin right), who

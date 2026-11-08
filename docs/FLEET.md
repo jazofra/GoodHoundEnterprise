@@ -24,7 +24,7 @@ reproducible, which breaks run-to-run trends.
 |---|---|---|---|
 | Link investigator | Top-N weakest link (`--links`, default 5) | Does the relationship still exist? What are both ends for? What would the fix break, and who owns it? What path remains afterwards? Is there a matching BHE finding? | `claude-sonnet-5-5`, effort `medium` |
 | Path validator | Top-N busiest path (`--paths`, default 3) | Does every hop still exist, and is it fresh? Is the path realistic? Which single hop is the best cut? What remains afterwards? | `claude-sonnet-5-5`, effort `medium` |
-| Lead | Run | Merges the cards into at most 8 prioritised actions, an executive summary and caveats | `claude-opus-5-5`, effort `high` |
+| Lead | Run | Merges the cards into at most 8 actions ordered by the exposure each removes, an executive summary and caveats | `claude-opus-5-5`, effort `high` |
 
 Each analyst returns a **remediation card**, a JSON object enforced with structured outputs:
 
@@ -48,8 +48,8 @@ approval) or the REST connection, and exposes these tools:
 | `inbound_control` | Who holds attack rights over an object |
 | `group_members` | Direct members (sample) and the nested enabled non-Tier Zero user count |
 | `outbound_rights` | Attack rights an object holds |
-| `paths_using_link` | Which analysed paths use a relationship (from this run, no query) |
-| `path_without_link` | What path would remain from a start node without one relationship |
+| `paths_using_link` | Which start nodes depend on a relationship, with their reach probability now and without it (from this run, no query) |
+| `path_without_link` | Reach probability before and after removing one relationship, and the most likely path that remains |
 | `run_cypher` | One read-only, bounded Cypher query (checked by `assert_hunter_safe`) |
 | `list_bloodhound_tools` / `call_bloodhound_tool` | Pass-through to Hunter's own typed tools (findings, remediation guidance). Hunter backend only |
 

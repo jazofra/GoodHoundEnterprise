@@ -91,14 +91,14 @@ def shortest_paths_from(settings: Settings, start_label: str, objectid: str, max
     )
 
 
-def all_shortest_paths_from(settings: Settings, start_label: str, objectid: str) -> str:
+def all_shortest_paths_from(settings: Settings, start_label: str, objectid: str, max_hops: int | None = None) -> str:
     """Every shortest path (not one per target) from a start node to Tier Zero."""
     tz = _label(settings.target_label)
     rels = rel_types(settings.traversable_edges)
     return (
         f"MATCH p=allShortestPaths((s:{_label(start_label)} {{objectid: {literal(objectid)}}})"
-        f"-[:{rels}*1..{settings.max_hops}]->(t:{tz})) "
-        f"RETURN p LIMIT {HUNTER_MAX_LIMIT}"
+        f"-[:{rels}*1..{max_hops or settings.max_hops}]->(t:{tz})) "
+        f"RETURN p LIMIT {settings.paths_per_start}"
     )
 
 
@@ -112,7 +112,7 @@ def member_count(settings: Settings, group_objectid: str) -> str:
     tz = _label(settings.target_label)
     return (
         f"MATCH (u:User)-[:MemberOf*1..{settings.max_hops}]->(g:Group {{objectid: {literal(group_objectid)}}}) "
-        f"WHERE u.enabled = true AND NOT u:{tz} "
+        f"WHERE u.enabled = true AND NOT u:{tz}{_domain_clause('u', settings)} "
         "RETURN count(DISTINCT u) AS members LIMIT 1"
     )
 
@@ -122,7 +122,7 @@ def unique_members(settings: Settings, group_objectids: Sequence[str]) -> str:
     ids = ", ".join(literal(i) for i in group_objectids)
     return (
         f"MATCH (u:User)-[:MemberOf*1..{settings.max_hops}]->(g:Group) "
-        f"WHERE g.objectid IN [{ids}] AND u.enabled = true AND NOT u:{tz} "
+        f"WHERE g.objectid IN [{ids}] AND u.enabled = true AND NOT u:{tz}{_domain_clause('u', settings)} "
         "RETURN count(DISTINCT u) AS users LIMIT 1"
     )
 
