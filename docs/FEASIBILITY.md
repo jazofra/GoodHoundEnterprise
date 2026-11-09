@@ -158,9 +158,16 @@ catalogue and the result of `bloodhound_status`.
    thousand SIDs (bodies under 2 MiB).
 4. **Performance:** does a shortest path to `(t:Tag_Tier_Zero)` from a large
    group finish inside the 30 s deadline? Does a `MemberOf*1..10` count on
-   Domain Users?
+   Domain Users? *Partly answered:* on large domains some `allShortestPaths`
+   queries exceed the deadline and Hunter returns a retryable
+   `query_timed_out` problem. Those start nodes fall back to `shortestPath`
+   for that node only, and nodes whose fallback also times out are skipped.
+   Both are counted in the report's grand totals.
 5. **Refresh tokens:** are they issued? This decides whether Hunter can drive
-   unattended runs, or whether the REST backend should.
+   unattended runs, or whether the REST backend should. *Answered:* yes. Access
+   tokens last about an hour and refresh tokens are **rotated on every use**,
+   so processes that share a token cache coordinate refreshes through a file
+   lock and pick up tokens another process has already refreshed.
 6. **ETAC-restricted users:** they get no Cypher. Can the typed tools alone
    answer "shortest path from X to Tier Zero" and "member count of X"?
 7. **Edge kinds:** does the tenant reject relationship kinds it does not know?
@@ -179,6 +186,15 @@ catalogue and the result of `bloodhound_status`.
   as such.
 - **AD only.** Azure/Entra (AZ edges, AZ Tier Zero) would need its own edge and
   cost table.
+- **Long runs see dropped connections.** Multi-hour runs on large domains lose
+  the streamable-HTTP session now and then. The Hunter backend reconnects with
+  the cached tokens and retries the query, so a drop no longer aborts the run.
+- **Skipped or single-path start nodes lower the numbers.** When the report
+  lists start nodes that were skipped or analysed with `shortestPath` only,
+  treat totals, exposure and reach as lower bounds. Paths of skipped start
+  nodes are not reported as resolved in the history. If more than 25 start
+  nodes (or 2% of those scanned) fail, the run aborts instead of recording a
+  misleading baseline, and a query Hunter rejects outright still aborts it.
 - **Reports are sensitive.** They are a map of how to own the domain, so store
   them accordingly. In agentic mode, graph data reaches the LLM provider, and
   Hunter's docs require an MCP client approved for your BloodHound data.

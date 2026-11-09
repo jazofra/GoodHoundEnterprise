@@ -31,7 +31,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
-from .config import Settings
+from .config import DUAL_CONTROL_GATED_EDGES, Settings
 from .graph import AttackPath, Edge, Graph, Hop, Node
 
 EdgeKey = tuple[str, str, str]  # (source objectid, kind, target objectid)
@@ -45,10 +45,20 @@ class GEdge:
     p: float
     cost: int
     last_seen: str | None = None
+    #: Shared condition this edge also needs (e.g. a CyberArk dual-control approval for a safe).
+    #: Every edge with the same gate depends on the *same* event, so parallel routes through it
+    #: are not independent: one approver won (or not) decides them all.
+    gate: str | None = None
+    gate_p: float = 1.0
 
     @property
     def key(self) -> EdgeKey:
         return (self.src, self.kind, self.dst)
+
+    @property
+    def p_eff(self) -> float:
+        """Probability of crossing this edge on its own, gate included."""
+        return self.p * self.gate_p
 
 
 @dataclass(frozen=True)
@@ -73,6 +83,18 @@ class AttackGraph:
         self.terminals = {oid for oid, n in self.nodes.items() if n.tier_zero and oid != start.objectid}
         self._paths: list[int] | None = None  # bitmasks over edge indices
         self._paths_overflow = False
+        # Independent events: one per edge, plus one per distinct gate shared by its edges.
+        self._event_p = [e.p for e in self.edges]
+        gates: dict[str, int] = {}
+        self._edge_events: list[int] = []
+        for i, e in enumerate(self.edges):
+            mask = 1 << i
+            if e.gate is not None:
+                if e.gate not in gates:
+                    gates[e.gate] = len(self._event_p)
+                    self._event_p.append(e.gate_p)
+                mask |= 1 << gates[e.gate]
+            self._edge_events.append(mask)
 
     # ------------------------------------------------------------------ construction
 
@@ -83,7 +105,7 @@ class AttackGraph:
             return None
         unique: dict[EdgeKey, GEdge] = {}
         for e in edges:
-            if e.p > 0 and e.src in nodes and e.dst in nodes:
+            if e.p_eff > 0 and e.src in nodes and e.dst in nodes:
                 unique.setdefault(e.key, e)
         out: dict[str, list[GEdge]] = {}
         for e in unique.values():
@@ -121,6 +143,7 @@ class AttackGraph:
         prob: Callable[[Edge, Node], float],
         cost: Callable[[str, str], int],
         allowed: Iterable[str],
+        gate: Callable[[Edge, Node], tuple[str, float] | None] | None = None,
     ) -> AttackGraph | None:
         start = graph.by_objectid(start_objectid)
         if start is None:
@@ -132,7 +155,18 @@ class AttackGraph:
             src, dst = graph.nodes.get(e.source), graph.nodes.get(e.target)
             if src is None or dst is None or not src.objectid or not dst.objectid or e.kind not in allowed_set:
                 continue
-            edges.append(GEdge(src.objectid, dst.objectid, e.kind, prob(e, dst), cost(e.kind, dst.kind), e.last_seen))
+            g = gate(e, dst) if gate else None
+            edges.append(
+                GEdge(
+                    src.objectid,
+                    dst.objectid,
+                    e.kind,
+                    prob(e, dst),
+                    cost(e.kind, dst.kind),
+                    e.last_seen,
+                    *(g or (None, 1.0)),
+                )
+            )
         return cls.from_edges(start, nodes, edges)
 
     def sub(self, objectid: str) -> AttackGraph | None:
@@ -163,7 +197,7 @@ class AttackGraph:
                 return self._rebuild(oid, parent)
             for i in self.out.get(oid, ()):
                 e = self.edges[i]
-                cand = (nlp - math.log(e.p), hops + 1, cost + e.cost)
+                cand = (nlp - math.log(e.p_eff), hops + 1, cost + e.cost)
                 cw = weight(*cand)
                 if e.dst not in best or cw < best[e.dst]:
                     best[e.dst] = cw
@@ -176,7 +210,7 @@ class AttackGraph:
         cost, oid = 0, end
         while oid != self.start.objectid:
             e = self.edges[parent[oid]]
-            hops.append(Hop(self.nodes[e.src], e.kind, self.nodes[e.dst], e.p, e.last_seen))
+            hops.append(Hop(self.nodes[e.src], e.kind, self.nodes[e.dst], e.p_eff, e.last_seen))
             cost += e.cost
             oid = e.src
         hops.reverse()
@@ -211,17 +245,28 @@ class AttackGraph:
         excluded_mask = sum(1 << i for i in excluded)
         if not self._paths_overflow:
             paths = [m for m in self._paths if not m & excluded_mask]
-            probs = [e.p for e in self.edges]
-            return Reach(_union_probability(paths, probs), len(paths), True)
+            return Reach(_union_probability([self._events_of(m) for m in paths], self._event_p), len(paths), True)
         seed = zlib.crc32(self.start.objectid.encode())
         return Reach(self._monte_carlo(excluded, settings.monte_carlo_samples, seed), len(self._paths), False)
 
+    def _events_of(self, edge_mask: int) -> int:
+        events = 0
+        while edge_mask:
+            low = edge_mask & -edge_mask
+            events |= self._edge_events[low.bit_length() - 1]
+            edge_mask ^= low
+        return events
+
     def _monte_carlo(self, excluded: set[int], samples: int, seed: int) -> float:
         rng = random.Random(seed)  # same seed -> same draws: removal deltas use common random numbers
-        probs = [0.0 if i in excluded else e.p for i, e in enumerate(self.edges)]
+        event_p = list(self._event_p)
+        for i in excluded:
+            event_p[i] = 0.0
         hits = 0
+        edge_events = [_bits(m) for m in self._edge_events]
         for _ in range(samples):
-            draws = [rng.random() for _ in probs]
+            events = [rng.random() < p for p in event_p]
+            present = [all(events[j] for j in ev) for ev in edge_events]
             stack, seen = [self.start.objectid], {self.start.objectid}
             while stack:
                 oid = stack.pop()
@@ -229,10 +274,19 @@ class AttackGraph:
                     hits += 1
                     break
                 for i in self.out.get(oid, ()):
-                    if draws[i] < probs[i] and self.edges[i].dst not in seen:
+                    if present[i] and self.edges[i].dst not in seen:
                         seen.add(self.edges[i].dst)
                         stack.append(self.edges[i].dst)
         return hits / samples if samples else 0.0
+
+
+def _bits(mask: int) -> list[int]:
+    out = []
+    while mask:
+        low = mask & -mask
+        out.append(low.bit_length() - 1)
+        mask ^= low
+    return out
 
 
 def _union_probability(paths: list[int], probs: list[float]) -> float:
@@ -259,23 +313,59 @@ def _union_probability(paths: list[int], probs: list[float]) -> float:
 # --------------------------------------------------------------------------
 
 
+def cyberark_platform_key(platform_id: object, objectid: str) -> tuple[str, str] | None:
+    """Join key between a CyberArk account and its platform.
+
+    Accounts carry the platform's ``platformId``; platform ids are unique per CyberArk
+    instance, and CyberArkHound suffixes every objectid with the instance name.
+    """
+    if not platform_id or not objectid or "-" not in objectid:
+        return None
+    return str(platform_id).lower(), objectid.rsplit("-", 1)[1].upper()
+
+
 class RiskContext:
     """Settings + the analysis time, turned into the functions the model needs."""
 
-    def __init__(self, settings: Settings, now: datetime) -> None:
+    def __init__(
+        self, settings: Settings, now: datetime, dual_control_platforms: frozenset[tuple[str, str]] = frozenset()
+    ) -> None:
         self.settings = settings
         self.now = now
+        self.dual_control_platforms = dual_control_platforms
 
     @property
     def objective(self) -> str:
         return "probability" if self.settings.risk_model == "probability" else "hops"
 
+    def requires_dual_control(self, account: Node) -> bool:
+        key = cyberark_platform_key(account.properties.get("platformId"), account.objectid)
+        return key is not None and key in self.dual_control_platforms
+
     def edge_probability(self, edge: Edge, target: Node) -> float:
         return self.settings.probability(edge.kind, target.kind, edge.last_seen, self.now)
 
+    def approval_gate(self, edge: Edge, target: Node) -> tuple[str, float] | None:
+        """Dual control is an AND: access to the account is not enough, someone else must approve
+        the release. Approvers are set per safe, so every account in one safe shares the event."""
+        if not (
+            edge.kind in DUAL_CONTROL_GATED_EDGES
+            and target.kind == "CyberArk_Account"
+            and self.requires_dual_control(target)
+        ):
+            return None
+        instance = target.objectid.rsplit("-", 1)[-1].upper()
+        safe = str(target.properties.get("safeName") or target.objectid).lower()
+        return f"cyberark-approval:{safe}@{instance}", self.settings.dual_control_probability
+
     def build(self, graph: Graph, start_objectid: str) -> AttackGraph | None:
         return AttackGraph.from_graph(
-            graph, start_objectid, self.edge_probability, self.settings.cost, self.settings.traversable_edges
+            graph,
+            start_objectid,
+            self.edge_probability,
+            self.settings.cost,
+            self.settings.traversable_edges,
+            self.approval_gate,
         )
 
 

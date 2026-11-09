@@ -114,9 +114,9 @@ async def test_goodhound_model_reproduces_the_original_numbers():
 
 async def test_suffix_reuse_saves_queries_only_when_enabled():
     _, executor = await run_demo(concurrency=1)
-    assert sum("ShortestPaths(" in q for q in executor.log) == 10  # every non-Tier Zero group
+    assert sum("ShortestPaths(" in q for q in executor.log) == 11  # every non-Tier Zero group
     result, executor = await run_demo(concurrency=1, reuse_suffixes=True)
-    assert sum("ShortestPaths(" in q for q in executor.log) < 10
+    assert sum("ShortestPaths(" in q for q in executor.log) < 11
     assert len(result.all_paths) == 9
 
 
@@ -134,6 +134,40 @@ async def test_falls_back_to_shortest_path_when_all_shortest_is_rejected():
     result = await analyse(source, tenant="demo")
     assert sum("allShortestPaths" in q for q in executor.log) == 0  # QueryError is raised before logging
     assert by_start(result)["IT SUPPORT"].paths == 1  # one path per target: the alternative is not visible
+
+
+async def test_timeouts_affect_only_the_slow_start_node(monkeypatch):
+    import asyncio
+
+    import goodhound_enterprise.source as src
+    from goodhound_enterprise.backends.base import RetryableQueryError
+
+    nodes = build_demo_graph().nodes.values()
+    it_support = next(n for n in nodes if n.name.startswith("IT SUPPORT@")).objectid
+    developers = next(n for n in nodes if n.name.startswith("DEVELOPERS@")).objectid
+
+    class Slow(DemoExecutor):
+        async def run(self, query):
+            if it_support in query and "allShortestPaths" in query:
+                raise RetryableQueryError("query_timed_out")
+            if developers in query and "shortest" in query.lower():
+                raise RetryableQueryError("query_timed_out")
+            return await super().run(query)
+
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(src.asyncio, "sleep", lambda _: real_sleep(0))
+    executor = Slow()
+    source = CypherGraphSource(executor, Settings(rate_limit=0, session_half_life_days=0), retries=2)
+    result = await analyse(source, tenant="demo")
+    rows = by_start(result)
+    # The slow group fell back to one path per target; everyone else kept allShortestPaths.
+    assert result.single_path_fallbacks == [it_support]
+    assert rows["IT SUPPORT"].paths == 1 and rows["SERVER ADMINS"].reach > 0
+    assert sum("allShortestPaths" in q for q in executor.log) > 1
+    # The group whose every query timed out is skipped and reported, not fatal.
+    assert developers in result.skipped_start_nodes and "DEVELOPERS" not in rows
+    summary = dict(report._summary(result))
+    assert summary["Start nodes skipped (query failed)"].startswith("1:")
 
 
 async def test_include_users_finds_direct_user_paths_but_not_inherited_ones():
@@ -164,6 +198,49 @@ async def test_fixed_path_shows_as_resolved_in_history(tmp_path):
     assert [start for start, _ in d2.resolved] == ["DOMAIN USERS@CONTOSO.LOCAL"]
     assert d2.previous_exposure == first.exposure and second.exposure < first.exposure
     assert second.users_with_path < first.users_with_path
+
+
+async def test_skipped_start_node_is_not_reported_as_resolved(tmp_path):
+    db = tmp_path / "h.db"
+    first, _ = await run_demo()
+    history.record(first, db)
+    du = f"{DOMAIN_SID}-513"
+    second, _ = await run_demo()
+    # Pretend Domain Users' query failed this run: its path is missing but was not re-checked.
+    second.all_paths = [r for r in second.all_paths if r.path.start.objectid != du]
+    second.skipped_start_nodes = [du]
+    d2 = history.record(second, db)
+    assert d2.resolved == []
+
+
+async def test_rejected_path_query_aborts_instead_of_skipping():
+    from goodhound_enterprise.backends.base import QueryError
+
+    class Rejecting(DemoExecutor):
+        async def run(self, query):
+            if f"{DOMAIN_SID}-513" in query and "shortest" in query.lower():
+                raise QueryError("rejected by the validator")
+            return await super().run(query)
+
+    source = CypherGraphSource(Rejecting(), Settings(rate_limit=0, session_half_life_days=0))
+    with pytest.raises(QueryError, match="rejected"):
+        await analyse(source, tenant="demo")
+
+
+async def test_many_failing_start_nodes_abort_the_run(monkeypatch):
+    import goodhound_enterprise.analysis as analysis_mod
+    from goodhound_enterprise.backends.base import QueryError, RetryableQueryError
+
+    class Down(DemoExecutor):
+        async def run(self, query):
+            if "shortest" in query.lower():
+                raise RetryableQueryError("query_timed_out")
+            return await super().run(query)
+
+    monkeypatch.setattr(analysis_mod, "MAX_SKIPPED_START_NODES", 2)
+    source = CypherGraphSource(Down(), Settings(rate_limit=0, session_half_life_days=0), retries=1)
+    with pytest.raises(QueryError, match="aborting"):
+        await analyse(source, tenant="demo")
 
 
 async def test_history_upgrades_an_old_database(tmp_path):
@@ -235,3 +312,49 @@ async def test_weakest_link_early_stop_matches_exhaustive_ranking():
     key = lambda w: (w.hop.source.objectid, w.hop.kind, w.hop.target.objectid, w.risk_reduction)  # noqa: E731
     assert [key(w) for w in top3.weakest] == [key(w) for w in everything.weakest[:3]]
     assert top3.queries_sent < everything.queries_sent  # the bound skipped exact scoring of the tail
+
+
+async def test_ad_only_runs_ignore_opengraph_edges():
+    result, executor = await run_demo()
+    assert "PAM OPERATORS" not in by_start(result) and "MARKETING" not in by_start(result)
+    assert not any("CyberArk" in q for q in executor.log)
+    assert result.opengraph == {}
+
+
+async def test_cyberark_paths_and_dual_control():
+    result, executor = await run_demo(opengraph=["CyberArk"])
+    rows = by_start(result)
+    access = 0.9 * D  # HasAccessTo is an attacker action; the sync and containment hops are structural
+    # PAM OPERATORS -> CyberArk group -> safe -> vaulted ADM.JSMITH -> AD user (Tier Zero): no approval needed.
+    ops = rows["PAM OPERATORS"]
+    assert [h.kind for h in ops.path.hops] == [
+        "CyberArk_SyncsToGroup",
+        "CyberArk_HasAccessTo",
+        "CyberArk_Contains",
+        "CyberArk_SyncsToADUser",
+    ]
+    assert ops.reach == pytest.approx(access)
+    # MARKETING reaches ADM.KLEE through a dual-control platform: an approver must be won too (AND).
+    marketing = rows["MARKETING"]
+    assert marketing.path.hops[-1].target.name == "ADM.KLEE@CONTOSO.LOCAL"
+    assert marketing.reach == pytest.approx(access * 0.25)
+    assert result.opengraph["CyberArk"] and result.dual_control_platforms == 1
+    assert "OpenGraph edges traversed" in dict(report._summary(result))
+    for q in executor.log:
+        cypher.assert_hunter_safe(q)
+
+    # A softer approval process raises the chance accordingly.
+    lenient, _ = await run_demo(opengraph=["CyberArk"], dual_control_probability=0.5)
+    assert by_start(lenient)["MARKETING"].reach == pytest.approx(access * 0.5)
+
+
+async def test_toml_probabilities_override_opengraph_defaults(tmp_path):
+    from goodhound_enterprise.config import load_settings
+
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('opengraph = ["CyberArk"]\n[edge_probability]\nCyberArk_HasAccessTo = 0.5\n')
+    settings = load_settings(cfg, rate_limit=0, session_half_life_days=0)
+    added = settings.add_edges(["CyberArk_HasAccessTo", "CyberArk_SyncsToADUser", "CyberArk_SomethingNew"])
+    assert added and settings.edge_probability["CyberArk_HasAccessTo"] == 0.5
+    assert settings.edge_probability["CyberArk_SomethingNew"] == settings.default_probability
+    assert settings.cost("CyberArk_SyncsToADUser") == 0 and settings.probability("CyberArk_SyncsToADUser") == 1.0

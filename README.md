@@ -28,6 +28,11 @@ paths (more routes, higher reach), each relationship's likelihood, and how recen
 session was seen. [docs/RISK_MODEL.md](docs/RISK_MODEL.md) gives the formulas, the
 defaults and the assumptions. `--risk-model goodhound` keeps GoodHound's original formula.
 
+Paths that leave AD and come back can be included with `--opengraph CyberArk,MSSQL`. For example, an AD
+group synced into CyberArk retrieves the vaulted password of a Tier Zero admin. CyberArk dual control
+is modelled as a shared approval per safe that the attacker must also win. See
+[docs/RISK_MODEL.md](docs/RISK_MODEL.md#opengraph-extensions-cyberark-mssql).
+
 ## How it works with Hunter
 
 Hunter is a remote, read-only MCP server at `https://<tenant>/api/v2/hunter/mcp`.
@@ -103,6 +108,7 @@ a fallback route.
 | `--db-skip`, `-sqlpath` | `--db-skip`, `--db` |
 | — | `--risk-model probability\|goodhound`, `--detection`, `--session-half-life`, `--sort probability` |
 | — | `--domain-sid`, `--max-hops` (≤10), `--target-label`, `--include-users`, `--reuse-suffixes`, `--one-path-per-target`, `--concurrency`, `--rate-limit` |
+| — | `--opengraph CyberArk,MSSQL` (also traverse OpenGraph extension edges), `--dual-control-probability` |
 
 See [`examples/config.example.toml`](examples/config.example.toml) for the
 edge-cost model.

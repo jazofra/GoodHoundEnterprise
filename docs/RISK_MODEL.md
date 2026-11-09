@@ -123,6 +123,43 @@ CanRDP = 0.6                    # unpatched hosts, privesc is easy
 "GenericAll->Domain" = 0.8      # cost depends on the target kind
 ```
 
+## OpenGraph extensions (CyberArk, MSSQL)
+
+AD paths often continue through other systems. An AD group is synced into a CyberArk group, that group
+can retrieve a vaulted password, and the vaulted account *is* a Tier Zero AD user. With
+`--opengraph CyberArk,MSSQL` (or `opengraph = ["CyberArk", "MSSQL"]` in the TOML) those relationships
+are traversed too.
+
+- **Which kinds.** The tool reads the tenant's Hunter capability catalog (`hunter://graph/capabilities`)
+  and adds every relationship kind marked traversable whose name starts with the prefix (`CyberArk_`,
+  `MSSQL_`, or any other extension). Hunter rejects queries that name kinds it does not know, so kinds
+  are never guessed. Backends without the catalog fall back to the built-in tables.
+- **Probabilities.** Identity links are structural, with probability 1 and no detection: `SyncsToUser`,
+  `SyncsToGroup`, `SyncsToADUser`, `MemberOf`, `Contains` and `MSSQL_HasLogin`. Retrieving a vaulted
+  password (`CyberArk_HasAccessTo`) is 0.9, and granting yourself access (`CyberArk_CanGrantAccessTo`) is
+  0.8. The full table is `OPENGRAPH_EDGE_PROBABILITY` in `config.py`, and `[edge_probability]` overrides
+  it. Kinds without a default use `default_probability`.
+
+### Dual control is an AND, shared per safe
+
+When an account's CyberArk platform has `requireDualControlPasswordAccessApproval`, access alone does
+not release the password: someone else must approve it. The attacker therefore also needs an approver,
+by compromising one or by talking one into approving. That chance is `dual_control_probability`
+(default 0.25, `--dual-control-probability`).
+
+Approvers are configured per safe, so every dual-control account in one safe depends on the **same**
+approval event. The model adds one shared event per (safe, CyberArk instance), next to the
+per-relationship events, and computes reach exactly over all of them:
+
+- 12 dual-control accounts in one safe, each 90% accessible: reach ≈ 0.25 × (1 − 0.1¹²) ≈ 0.25, not
+  1 − (1 − 0.9 × 0.25)¹² ≈ 0.95.
+- Accounts in two different safes: two independent approvals, 1 − (1 − 0.9 × 0.25)².
+
+The gate applies to `CyberArk_HasAccessTo`, `CyberArk_CanGrantAccessTo` and `CyberArk_Contains` into
+a dual-control account. CCP retrieval by applications (`CyberArk_CanRetrieveViaCCP`) is not gated,
+because dual control does not apply to it. The approver is not traced as a separate path: if the
+attacker already controls an approver, the real chance is higher than modelled.
+
 ## Assumptions and limits
 
 - **Independence.** Relationships succeed or fail independently. Correlated defences, such as one EDR

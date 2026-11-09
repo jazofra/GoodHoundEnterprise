@@ -179,6 +179,19 @@ def _add_run_args(run: argparse.ArgumentParser, *, default_formats: str) -> None
         dest="all_shortest_paths",
         help="Use shortestPath instead of allShortestPaths (fewer alternatives counted)",
     )
+    q.add_argument(
+        "--opengraph",
+        action="append",
+        metavar="PREFIX[,PREFIX]",
+        help="Also traverse OpenGraph extension edges by kind prefix, e.g. --opengraph CyberArk,MSSQL "
+        "(traversable kinds come from the tenant's Hunter capability catalog)",
+    )
+    q.add_argument(
+        "--dual-control-probability",
+        type=float,
+        dest="dual_control_probability",
+        help="Chance (0-1) of getting a CyberArk dual-control password release approved (default 0.25)",
+    )
     q.add_argument("--concurrency", type=int, help="Parallel queries (default 4)")
     q.add_argument("--rate-limit", type=float, help="Max queries per second (default 10)")
     d = run.add_argument_group("History")
@@ -248,6 +261,8 @@ def _settings(args: argparse.Namespace):
         per_action_detection=args.per_action_detection,
         session_half_life_days=args.session_half_life_days,
         reuse_suffixes=args.reuse_suffixes,
+        opengraph=[p.strip() for v in args.opengraph for p in v.split(",") if p.strip()] if args.opengraph else None,
+        dual_control_probability=args.dual_control_probability,
         all_shortest_paths=args.all_shortest_paths,
     )
 

@@ -8,9 +8,10 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from . import cypher
-from .backends.base import CypherExecutor, QueryError, RateLimiter
-from .config import Settings
+from .backends.base import CypherExecutor, QueryError, RateLimiter, RetryableQueryError
+from .config import HUNTER_MAX_LIMIT, OPENGRAPH_EDGE_PROBABILITY, Settings
 from .graph import Edge, Graph, Node, parse_graph
+from .risk import cyberark_platform_key
 
 log = logging.getLogger(__name__)
 
@@ -24,20 +25,28 @@ class CypherGraphSource:
         self._limiter = RateLimiter(settings.rate_limit)
         self.queries_sent = 0
         self._all_shortest_unsupported = False
+        self.single_path_fallbacks: list[str] = []
 
-    async def query(self, query: str) -> Graph:
+    async def query(self, query: str, *, retries: int | None = None) -> Graph:
+        retries = retries or self.retries
         cypher.assert_hunter_safe(query, self.settings.max_hops)
         async with self._sem:
-            for attempt in range(1, self.retries + 1):
+            for attempt in range(1, retries + 1):
                 await self._limiter.wait()
                 self.queries_sent += 1
                 try:
                     raw: Any = await self.executor.run(query)
                     return parse_graph(raw, self.settings.target_label)
+                except RetryableQueryError as exc:
+                    if attempt == retries:
+                        raise
+                    backoff = 2**attempt
+                    log.warning("Query failed (%s); retrying in %ss", str(exc)[:200], backoff)
+                    await asyncio.sleep(backoff)
                 except QueryError:
                     raise
                 except Exception as exc:  # transport hiccup, 429, timeout...
-                    if attempt == self.retries:
+                    if attempt == retries:
                         raise
                     backoff = 2**attempt
                     log.warning("Query failed (%s); retrying in %ss", exc, backoff)
@@ -60,6 +69,45 @@ class CypherGraphSource:
 
     async def count_enabled_users(self) -> int:
         return await self.scalar(cypher.count_enabled_users(self.settings), "total")
+
+    async def enable_opengraph(self) -> dict[str, list[str]]:
+        """Add the traversable relationship kinds of the configured OpenGraph extensions.
+
+        Hunter's capability catalog is authoritative (it also knows kinds this tool has
+        no defaults for). Other backends fall back to the built-in tables. Unknown kinds
+        must never reach a query: Hunter rejects the whole query.
+        """
+        prefixes = [p.rstrip("_") for p in self.settings.opengraph if p]
+        if not prefixes:
+            return {}
+        catalog_fn = getattr(self.executor, "relationship_catalog", None)
+        catalog = await catalog_fn() if catalog_fn else None
+        if catalog is None:
+            catalog = {k: True for k in OPENGRAPH_EDGE_PROBABILITY}
+        enabled: dict[str, list[str]] = {}
+        for prefix in prefixes:
+            kinds = sorted(k for k, traversable in catalog.items() if traversable and k.startswith(f"{prefix}_"))
+            if not kinds:
+                log.warning("No traversable %s_* relationship kinds on this tenant; ignoring it", prefix)
+                continue
+            enabled[prefix] = self.settings.add_edges(kinds)
+        return enabled
+
+    async def dual_control_platforms(self) -> set[tuple[str, str]]:
+        """(platformId, instance) of CyberArk platforms that require dual-control approval."""
+        found: set[tuple[str, str]] = set()
+        after: str | None = None
+        while True:
+            graph = await self.query(cypher.list_nodes("CyberArk_Platform", after))
+            page = sorted((n for n in graph.nodes.values() if n.objectid), key=lambda n: n.objectid)
+            for node in page:
+                if node.properties.get("requireDualControlPasswordAccessApproval") is True:
+                    key = cyberark_platform_key(node.properties.get("platformId"), node.objectid)
+                    if key:
+                        found.add(key)
+            if len(graph.nodes) < HUNTER_MAX_LIMIT or not page:
+                return found
+            after = page[-1].objectid
 
     async def domains(self) -> list[Node]:
         graph = await self.query(cypher.list_domains())
@@ -84,17 +132,30 @@ class CypherGraphSource:
         """Union of the shortest paths from ``start`` to the reachable Tier Zero nodes.
 
         Prefers ``allShortestPaths`` (every equally short alternative, which the reach
-        probability needs) and falls back to ``shortestPath`` (one path per target) for good
-        if the backend rejects it.
+        probability needs) and falls back to ``shortestPath`` (one path per target): for good
+        if the backend rejects it, or for this start node only if it times out.
         """
         if self.settings.all_shortest_paths and not self._all_shortest_unsupported:
             query = cypher.all_shortest_paths_from(self.settings, start_label, start.objectid, max_hops)
             try:
-                return await self.query(query)
+                # A timed-out allShortestPaths rarely succeeds on retry; shortestPath is cheaper.
+                return await self.query(query, retries=1)
+            except RetryableQueryError as exc:
+                self._single_path_fallback(start, exc)
             except QueryError as exc:
                 self._all_shortest_unsupported = True
                 log.warning("allShortestPaths rejected (%s); falling back to shortestPath", str(exc)[:200])
+            except Exception as exc:  # client-side timeout or transport error
+                self._single_path_fallback(start, exc)
         return await self.query(cypher.shortest_paths_from(self.settings, start_label, start.objectid, max_hops))
+
+    def _single_path_fallback(self, start: Node, exc: BaseException) -> None:
+        self.single_path_fallbacks.append(start.objectid)
+        log.warning(
+            "allShortestPaths failed for %s (%s); using shortestPath for this start node",
+            start.name or start.objectid,
+            str(exc)[:120],
+        )
 
     async def first_hops(self, user: Node) -> list[tuple[Edge, Node]]:
         graph = await self.query(cypher.first_hops(self.settings, user.objectid))

@@ -170,3 +170,126 @@ async def test_connect_over_streamable_http(http_hunter, tmp_path):
         result = await analyse(source, tenant="http")
     assert result.busiest[0].path.start.name == "DOMAIN USERS@CONTOSO.LOCAL"
     assert len(demo.log) == result.queries_sent
+
+
+async def test_reconnects_when_the_transport_drops_mid_call():
+    """A dropped POST fails the SDK's transport task group; the run must survive it."""
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    import anyio
+
+    srv, _ = fake_hunter()
+    opened = 0
+
+    class Hanging:
+        async def call_tool(self, name, arguments):
+            await asyncio.Event().wait()
+
+    @asynccontextmanager
+    async def open_client():
+        nonlocal opened
+        opened += 1
+        if opened == 1:
+
+            async def drop():
+                await anyio.sleep(0.05)
+                raise ConnectionError("ReadError")
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(drop)
+                yield Hanging()
+        else:
+            async with Client(srv) as client:
+                yield client
+
+    executor = HunterExecutor(session_factory=open_client)
+    executor.tool_name, executor.query_arg = "bloodhound_cypher", "query"
+    try:
+        payload = await executor.run("MATCH (u:User) RETURN count(u) AS total LIMIT 1")
+    finally:
+        await executor.aclose()
+    assert opened == 2
+    assert executor.reconnects == 1
+    assert "total" in str(payload)
+
+
+async def test_reconnects_when_the_session_reports_connection_closed():
+    from contextlib import asynccontextmanager
+
+    from mcp.shared.exceptions import MCPError
+
+    from goodhound_enterprise.backends.hunter import MCP_CONNECTION_CLOSED
+
+    srv, _ = fake_hunter()
+    opened = 0
+
+    class Closed:
+        async def call_tool(self, name, arguments):
+            raise MCPError(code=MCP_CONNECTION_CLOSED, message="Connection closed")
+
+    @asynccontextmanager
+    async def open_client():
+        nonlocal opened
+        opened += 1
+        if opened == 1:
+            yield Closed()
+        else:
+            async with Client(srv) as client:
+                yield client
+
+    executor = HunterExecutor(session_factory=open_client)
+    executor.tool_name, executor.query_arg = "bloodhound_cypher", "query"
+    executor.max_reconnects = 2
+    try:
+        payload = await executor.run("MATCH (u:User) RETURN count(u) AS total LIMIT 1")
+    finally:
+        await executor.aclose()
+    assert opened == 2 and executor.reconnects == 1
+    assert "total" in str(payload)
+
+
+async def test_retryable_hunter_problem_raises_retryable_error():
+    from types import SimpleNamespace
+
+    from goodhound_enterprise.backends.base import RetryableQueryError
+
+    class TimedOut:
+        async def call_tool(self, name, arguments):
+            payload = {"status": "error", "problem": {"code": "query_timed_out", "retryable": True}}
+            return SimpleNamespace(structured_content=payload, content=[], is_error=True)
+
+    executor = HunterExecutor(TimedOut())
+    executor.tool_name, executor.query_arg = "bloodhound_cypher", "query"
+    with pytest.raises(RetryableQueryError):
+        await executor.run("MATCH (n) RETURN n LIMIT 1")
+
+
+async def test_opengraph_kinds_come_from_the_hunter_capability_catalog():
+    import json as _json
+
+    srv, demo = fake_hunter()
+
+    @srv.resource("hunter://graph/capabilities")
+    def capabilities() -> str:
+        kinds = [
+            {"name": "CyberArk_HasAccessTo", "traversable": True},
+            {"name": "CyberArk_SyncsToGroup", "traversable": True},
+            {"name": "CyberArk_SyncsToADUser", "traversable": True},
+            {"name": "CyberArk_Contains", "traversable": True},
+            {"name": "CyberArk_CanApprove", "traversable": False},
+            {"name": "MSSQL_HasLogin", "traversable": True},
+        ]
+        return _json.dumps({"relationship_kinds": kinds})
+
+    async with Client(srv) as client:
+        executor = HunterExecutor(client)
+        await executor.setup()
+        settings = Settings(rate_limit=0, session_half_life_days=0, opengraph=["CyberArk", "AWS"])
+        source = CypherGraphSource(executor, settings)
+        result = await analyse(source, tenant="fake")
+    enabled = result.opengraph["CyberArk"]
+    assert "CyberArk_HasAccessTo" in enabled and "CyberArk_CanApprove" not in enabled
+    assert "AWS" not in result.opengraph  # no such kinds on the tenant: never sent in a query
+    assert "MSSQL_HasLogin" not in settings.traversable_edges
+    assert "PAM OPERATORS@CONTOSO.LOCAL" in {r.path.start.name for r in result.all_paths}
