@@ -11,6 +11,7 @@ from a TOML file (see ``examples/config.example.toml``).
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -150,6 +151,67 @@ DEFAULT_TARGETED_PROBABILITY: dict[str, float] = {}
 #: hop and are not exposed to per-action detection.
 STRUCTURAL_EDGES = frozenset({"MemberOf", "Contains", "GPLink"})
 
+# --------------------------------------------------------------------------
+# OpenGraph extensions (opt-in with ``opengraph = ["CyberArk", "MSSQL"]``)
+# --------------------------------------------------------------------------
+# Which relationship kinds are traversable comes from the tenant at run time
+# (Hunter's graph capability catalog); these tables only supply calibration
+# defaults. Kinds without an entry use ``default_probability``.
+OPENGRAPH_EDGE_PROBABILITY: dict[str, float] = {
+    # CyberArk (CyberArkHound): identity sync and containment are structural.
+    "CyberArk_SyncsToUser": 1.0,
+    "CyberArk_SyncsToGroup": 1.0,
+    "CyberArk_MemberOf": 1.0,
+    "CyberArk_Contains": 1.0,
+    "CyberArk_SyncsToADUser": 1.0,  # holding the vaulted credential is being that AD user
+    "CyberArk_HasAccessTo": 0.9,  # retrieve/use the password; OTP or exclusive access may slow it down
+    "CyberArk_CanRetrieveViaCCP": 0.85,  # needs code execution on an allowed application host
+    "CyberArk_CanGrantAccessTo": 0.8,  # grant yourself access first; audited
+    "CyberArk_ManagedBy": 0.8,
+    "CyberArk_CanHijackViaReconcile": 0.7,
+    "CyberArk_CanConnect": 0.6,  # PSM session: isolated and monitored, no password disclosed
+    # MSSQL (MSSQLHound)
+    "MSSQL_MemberOf": 1.0,
+    "MSSQL_Contains": 1.0,
+    "MSSQL_HasLogin": 1.0,  # an AD principal acting through its own login
+    "MSSQL_ControlServer": 0.9,
+    "MSSQL_ControlDB": 0.9,
+    "MSSQL_Owns": 0.9,
+    "MSSQL_AddMember": 0.9,
+    "MSSQL_ChangePassword": 0.9,
+    "MSSQL_ExecuteAs": 0.9,
+    "MSSQL_ExecuteAsOwner": 0.85,
+    "MSSQL_GrantAnyPermission": 0.85,
+    "MSSQL_GrantAnyDBPermission": 0.85,
+    "MSSQL_ServiceAccountFor": 0.9,
+    "MSSQL_HostFor": 0.85,
+    "MSSQL_ExecuteOnHost": 0.8,
+    "MSSQL_LinkedAsAdmin": 0.8,
+    "MSSQL_GetAdminTGS": 0.7,
+    "MSSQL_GetTGS": 0.6,
+    "MSSQL_HasDBScopedCred": 0.6,  # the stored credential may not be usable
+    "MSSQL_HasMappedCred": 0.6,
+    "MSSQL_HasProxyCred": 0.6,
+    "MSSQL_CoerceAndRelayToMSSQL": 0.5,
+}
+
+OPENGRAPH_STRUCTURAL_EDGES = frozenset(
+    {
+        "CyberArk_SyncsToUser",
+        "CyberArk_SyncsToGroup",
+        "CyberArk_MemberOf",
+        "CyberArk_Contains",
+        "CyberArk_SyncsToADUser",
+        "MSSQL_MemberOf",
+        "MSSQL_Contains",
+        "MSSQL_HasLogin",
+    }
+)
+
+#: Relationships into a CyberArk account that are gated by the account platform's
+#: dual-control setting (CCP retrieval by applications is not).
+DUAL_CONTROL_GATED_EDGES = frozenset({"CyberArk_HasAccessTo", "CyberArk_CanGrantAccessTo", "CyberArk_Contains"})
+
 RISK_MODELS = ("probability", "goodhound")
 
 # GoodHound priced some rights higher when the target is a Domain object.
@@ -189,6 +251,12 @@ REMEDIATION_HINTS: dict[str, str] = {
     "GPLink": "Review who can edit the linked GPO.",
     "Contains": "Review who controls the parent OU/container.",
     "ADCSESC1": "Fix the vulnerable certificate template (ESC1).",
+    "CyberArk_HasAccessTo": "Remove the safe/account permission, or move the account to a dual-control platform.",
+    "CyberArk_CanGrantAccessTo": "Remove Manage Safe Members from non-Tier Zero identities.",
+    "CyberArk_SyncsToGroup": "Review which AD group is mapped to this CyberArk group.",
+    "CyberArk_SyncsToADUser": "Keep Tier Zero credentials in dedicated, dual-control safes.",
+    "MSSQL_HasLogin": "Remove the SQL login or reduce its server privileges.",
+    "MSSQL_ExecuteOnHost": "Disable xp_cmdshell/agent jobs or run SQL Server as a low-privilege account.",
 }
 
 
@@ -239,6 +307,12 @@ class Settings:
     #: Reuse an intermediate group's suffix of another group's path instead of
     #: querying it (fewer queries, but its reach can be underestimated).
     reuse_suffixes: bool = False
+    #: OpenGraph extensions to traverse, by relationship-kind prefix (e.g. "CyberArk",
+    #: "MSSQL"). The traversable kinds are resolved from the tenant when the run starts.
+    opengraph: list[str] = field(default_factory=list)
+    #: Chance of getting a password release approved when the account's CyberArk platform
+    #: requires dual control: the attacker must also compromise or deceive an approver.
+    dual_control_probability: float = 0.25
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_hops <= HUNTER_MAX_HOPS:
@@ -267,6 +341,21 @@ class Settings:
     def traversable_edges(self) -> list[str]:
         return list(dict.fromkeys([*self.edge_costs, *self.edge_probability]))
 
+    @property
+    def structural_edges(self) -> frozenset[str]:
+        return STRUCTURAL_EDGES | OPENGRAPH_STRUCTURAL_EDGES
+
+    def add_edges(self, kinds: Iterable[str]) -> list[str]:
+        """Make extra (OpenGraph) relationship kinds traversable; values already set (TOML) win."""
+        added = []
+        for kind in kinds:
+            if kind not in self.edge_probability:
+                self.edge_probability[kind] = OPENGRAPH_EDGE_PROBABILITY.get(kind, self.default_probability)
+            if kind not in self.edge_costs:
+                self.edge_costs[kind] = 0 if kind in self.structural_edges else self.default_cost
+            added.append(kind)
+        return added
+
     def probability(
         self,
         edge_kind: str,
@@ -288,7 +377,7 @@ class Settings:
             age = _age_days(last_seen, now)
             if age is not None and age > 0:
                 p *= 0.5 ** (age / self.session_half_life_days)
-        if edge_kind not in STRUCTURAL_EDGES:
+        if edge_kind not in self.structural_edges:
             p *= 1.0 - self.per_action_detection
         return max(0.0, min(1.0, p))
 

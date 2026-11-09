@@ -74,6 +74,12 @@ def list_start_nodes(settings: Settings, start_label: str, after: str | None) ->
     return f"MATCH (s:{label}) WHERE {' AND '.join(where)} RETURN s ORDER BY s.objectid ASC LIMIT {settings.page_size}"
 
 
+def list_nodes(label: str, after: str | None) -> str:
+    """One keyset-paginated page of nodes with ``label``, ordered by objectid."""
+    where = f" WHERE n.objectid > {literal(after)}" if after is not None else ""
+    return f"MATCH (n:{_label(label)}){where} RETURN n ORDER BY n.objectid ASC LIMIT {HUNTER_MAX_LIMIT}"
+
+
 def shortest_paths_from(settings: Settings, start_label: str, objectid: str, max_hops: int | None = None) -> str:
     """Shortest paths from one start node to every reachable Tier Zero node.
 

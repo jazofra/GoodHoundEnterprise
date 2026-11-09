@@ -186,3 +186,35 @@ async def test_distinct_exposure_failure_and_empty_cases():
     assert await distinct_exposure({"g": 0.5}, {}, 10, broken, 25) == (None, True)
     assert await distinct_exposure({}, {}, 10, broken, 25) == (0.0, False)
     assert await distinct_exposure({"g": 0.5}, {}, 0, broken, 25) == (0.0, False)
+
+
+def _approval_graph(same_safe: bool) -> AttackGraph:
+    nodes = {oid: node(oid) for oid in ("S", "CAG", "A1", "A2")}
+    nodes["T"] = Node("T", "T", "T", "User", tier_zero=True)
+    g1, g2 = ("approval:safe1", "approval:safe1") if same_safe else ("approval:safe1", "approval:safe2")
+    edges = [
+        GEdge("S", "CAG", "CyberArk_SyncsToGroup", 1.0, 0),
+        GEdge("CAG", "A1", "CyberArk_HasAccessTo", 0.9, 1, None, g1, 0.25),
+        GEdge("CAG", "A2", "CyberArk_HasAccessTo", 0.9, 1, None, g2, 0.25),
+        GEdge("A1", "T", "CyberArk_SyncsToADUser", 1.0, 0),
+        GEdge("A2", "T", "CyberArk_SyncsToADUser", 1.0, 0),
+    ]
+    return AttackGraph.from_edges(nodes["S"], nodes, edges)
+
+
+@pytest.mark.parametrize("exact_limit", [12, 1])  # 1 forces the Monte Carlo estimate
+def test_shared_approval_is_one_event_not_one_per_account(exact_limit):
+    settings = Settings(exact_path_limit=exact_limit, monte_carlo_samples=40000)
+    either_access = 1 - (1 - 0.9) ** 2
+    shared = _approval_graph(same_safe=True).reach(settings)
+    # Two accounts in one safe: the same approvers decide both releases.
+    assert shared.probability == pytest.approx(0.25 * either_access, abs=1e-9 if shared.exact else 0.01)
+    separate = _approval_graph(same_safe=False).reach(settings)
+    # Different safes, different approvers: two independent chances.
+    assert separate.probability == pytest.approx(1 - (1 - 0.9 * 0.25) ** 2, abs=1e-9 if separate.exact else 0.01)
+    # The best path shows the gate in its probability, and removing one access edge
+    # leaves the other route through the shared approval.
+    graph = _approval_graph(same_safe=True)
+    assert graph.best_path().probability == pytest.approx(0.9 * 0.25)
+    without = graph.reach(settings, exclude=[("CAG", "CyberArk_HasAccessTo", "A1")]).probability
+    assert without == pytest.approx(0.9 * 0.25, abs=1e-9 if shared.exact else 0.01)

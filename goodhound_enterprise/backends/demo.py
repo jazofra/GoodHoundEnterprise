@@ -29,6 +29,7 @@ class DemoNode:
     tier_zero: bool = False
     enabled: bool = True
     description: str = ""
+    properties: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -38,11 +39,21 @@ class DemoGraph:
     out: dict[int, list[tuple[str, int]]] = field(default_factory=dict)
     inbound: dict[int, list[tuple[str, int]]] = field(default_factory=dict)
 
-    def add(self, rid: str, name: str, kind: str, *, tier_zero: bool = False, enabled: bool = True) -> DemoNode:
-        oid = rid if rid.startswith("S-1-5-21") or kind == "Domain" else f"{DOMAIN_SID}-{rid}"
+    def add(
+        self,
+        rid: str,
+        name: str,
+        kind: str,
+        *,
+        tier_zero: bool = False,
+        enabled: bool = True,
+        properties: dict[str, Any] | None = None,
+    ) -> DemoNode:
+        opengraph = "_" in kind  # OpenGraph kinds (CyberArk_Account, ...) keep their own ids and names
+        oid = rid if rid.startswith("S-1-5-21") or kind == "Domain" or opengraph else f"{DOMAIN_SID}-{rid}"
         # BloodHound names users/groups NAME@DOMAIN; computers and domains are FQDNs already.
-        display = name if kind in ("Domain", "Computer") else f"{name}@{DOMAIN}"
-        node = DemoNode(len(self.nodes) + 1, oid, display, kind, tier_zero, enabled)
+        display = name if kind in ("Domain", "Computer") or opengraph else f"{name}@{DOMAIN}"
+        node = DemoNode(len(self.nodes) + 1, oid, display, kind, tier_zero, enabled, properties=dict(properties or {}))
         self.nodes[node.id] = node
         self.by_oid[oid] = node
         return node
@@ -146,6 +157,37 @@ def build_demo_graph(users: int = 400) -> DemoGraph:
     g.link(groups["FINANCE"], "ADCSESC1", domain)
     first_user = g.by_oid[f"{DOMAIN_SID}-2007"]
     g.link(first_user, "ForceChangePassword", svc_sql)
+
+    # CyberArk (OpenGraph): only traversed with opengraph = ["CyberArk"].
+    pam_operators = g.add("1210", "PAM OPERATORS", "Group")
+    g.add(
+        "CAPLATFORM-WINDOMAINDUAL-DEMO",
+        "WINDOWS DOMAIN DUAL CONTROL",
+        "CyberArk_Platform",
+        properties={"platformId": "WinDomainDual", "requireDualControlPasswordAccessApproval": True},
+    )
+    g.add(
+        "CAPLATFORM-WINDOMAIN-DEMO",
+        "WINDOWS DOMAIN ACCOUNT",
+        "CyberArk_Platform",
+        properties={"platformId": "WinDomain", "requireDualControlPasswordAccessApproval": False},
+    )
+    ca_marketing = g.add("CAGROUP-PAM_MARKETING-DEMO", "PAM_MARKETING", "CyberArk_Group")
+    ca_operators = g.add("CAGROUP-PAM_OPERATORS-DEMO", "PAM_OPERATORS", "CyberArk_Group")
+    safe = g.add("CASAFE-T0_ADMINS-DEMO", "T0_ADMINS", "CyberArk_Safe")
+    dual_account = g.add(
+        "CAACCOUNT-1_1-DEMO", "ADM.KLEE", "CyberArk_Account", properties={"platformId": "WinDomainDual"}
+    )
+    plain_account = g.add(
+        "CAACCOUNT-1_2-DEMO", "ADM.JSMITH", "CyberArk_Account", properties={"platformId": "WinDomain"}
+    )
+    g.link(groups["MARKETING"], "CyberArk_SyncsToGroup", ca_marketing)
+    g.link(ca_marketing, "CyberArk_HasAccessTo", dual_account)
+    g.link(dual_account, "CyberArk_SyncsToADUser", adm_klee)
+    g.link(pam_operators, "CyberArk_SyncsToGroup", ca_operators)
+    g.link(ca_operators, "CyberArk_HasAccessTo", safe)
+    g.link(safe, "CyberArk_Contains", plain_account)
+    g.link(plain_account, "CyberArk_SyncsToADUser", adm_jsmith)
     return g
 
 
@@ -166,6 +208,7 @@ def _node_json(n: DemoNode) -> dict[str, Any]:
             "enabled": n.enabled,
             "domainsid": DOMAIN_SID,
             "description": n.description,
+            **n.properties,
         },
     }
 
@@ -247,6 +290,14 @@ class DemoExecutor:
                     and (label != "User" or n.enabled)
                     and (after is None or n.objectid > after.group(1))
                 ),
+                key=lambda n: n.objectid,
+            )
+            return _graph(nodes[:limit])
+
+        if m := re.match(r"MATCH \(n:(\w+)\)(?: WHERE n\.objectid > '([^']+)')? RETURN n ORDER BY", query):
+            label, after = m.groups()
+            nodes = sorted(
+                (n for n in g.nodes.values() if n.kind == label and (after is None or n.objectid > after)),
                 key=lambda n: n.objectid,
             )
             return _graph(nodes[:limit])

@@ -114,9 +114,9 @@ async def test_goodhound_model_reproduces_the_original_numbers():
 
 async def test_suffix_reuse_saves_queries_only_when_enabled():
     _, executor = await run_demo(concurrency=1)
-    assert sum("ShortestPaths(" in q for q in executor.log) == 10  # every non-Tier Zero group
+    assert sum("ShortestPaths(" in q for q in executor.log) == 11  # every non-Tier Zero group
     result, executor = await run_demo(concurrency=1, reuse_suffixes=True)
-    assert sum("ShortestPaths(" in q for q in executor.log) < 10
+    assert sum("ShortestPaths(" in q for q in executor.log) < 11
     assert len(result.all_paths) == 9
 
 
@@ -312,3 +312,49 @@ async def test_weakest_link_early_stop_matches_exhaustive_ranking():
     key = lambda w: (w.hop.source.objectid, w.hop.kind, w.hop.target.objectid, w.risk_reduction)  # noqa: E731
     assert [key(w) for w in top3.weakest] == [key(w) for w in everything.weakest[:3]]
     assert top3.queries_sent < everything.queries_sent  # the bound skipped exact scoring of the tail
+
+
+async def test_ad_only_runs_ignore_opengraph_edges():
+    result, executor = await run_demo()
+    assert "PAM OPERATORS" not in by_start(result) and "MARKETING" not in by_start(result)
+    assert not any("CyberArk" in q for q in executor.log)
+    assert result.opengraph == {}
+
+
+async def test_cyberark_paths_and_dual_control():
+    result, executor = await run_demo(opengraph=["CyberArk"])
+    rows = by_start(result)
+    access = 0.9 * D  # HasAccessTo is an attacker action; the sync and containment hops are structural
+    # PAM OPERATORS -> CyberArk group -> safe -> vaulted ADM.JSMITH -> AD user (Tier Zero): no approval needed.
+    ops = rows["PAM OPERATORS"]
+    assert [h.kind for h in ops.path.hops] == [
+        "CyberArk_SyncsToGroup",
+        "CyberArk_HasAccessTo",
+        "CyberArk_Contains",
+        "CyberArk_SyncsToADUser",
+    ]
+    assert ops.reach == pytest.approx(access)
+    # MARKETING reaches ADM.KLEE through a dual-control platform: an approver must be won too (AND).
+    marketing = rows["MARKETING"]
+    assert marketing.path.hops[-1].target.name == "ADM.KLEE@CONTOSO.LOCAL"
+    assert marketing.reach == pytest.approx(access * 0.25)
+    assert result.opengraph["CyberArk"] and result.dual_control_platforms == 1
+    assert "OpenGraph edges traversed" in dict(report._summary(result))
+    for q in executor.log:
+        cypher.assert_hunter_safe(q)
+
+    # A softer approval process raises the chance accordingly.
+    lenient, _ = await run_demo(opengraph=["CyberArk"], dual_control_probability=0.5)
+    assert by_start(lenient)["MARKETING"].reach == pytest.approx(access * 0.5)
+
+
+async def test_toml_probabilities_override_opengraph_defaults(tmp_path):
+    from goodhound_enterprise.config import load_settings
+
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('opengraph = ["CyberArk"]\n[edge_probability]\nCyberArk_HasAccessTo = 0.5\n')
+    settings = load_settings(cfg, rate_limit=0, session_half_life_days=0)
+    added = settings.add_edges(["CyberArk_HasAccessTo", "CyberArk_SyncsToADUser", "CyberArk_SomethingNew"])
+    assert added and settings.edge_probability["CyberArk_HasAccessTo"] == 0.5
+    assert settings.edge_probability["CyberArk_SomethingNew"] == settings.default_probability
+    assert settings.cost("CyberArk_SyncsToADUser") == 0 and settings.probability("CyberArk_SyncsToADUser") == 1.0

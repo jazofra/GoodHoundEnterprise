@@ -34,6 +34,14 @@ all_shortest_paths = true
 # reach can be underestimated.
 reuse_suffixes = false
 
+# Also traverse OpenGraph extension edges, by relationship-kind prefix. The traversable
+# kinds are read from the tenant's Hunter capability catalog at the start of the run.
+# opengraph = ["CyberArk", "MSSQL"]
+
+# Chance of getting a CyberArk dual-control password release approved without already
+# controlling an approver. Shared by every account in the same safe.
+dual_control_probability = 0.25
+
 # Throughput. Hunter's documented shared limit is 55 requests/s per client IP.
 concurrency = 4
 rate_limit = 10.0

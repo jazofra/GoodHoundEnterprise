@@ -39,6 +39,7 @@ log = logging.getLogger(__name__)
 MCP_CONNECTION_CLOSED = -32000
 
 HUNTER_PATH = "/api/v2/hunter/mcp"
+GRAPH_CAPABILITIES_URI = "hunter://graph/capabilities"
 PREFERRED_TOOL_NAMES = ("bloodhound_cypher", "run_cypher", "cypher_query", "cypher", "execute_cypher")
 QUERY_ARG_NAMES = ("query", "cypher", "cypher_query", "statement")
 
@@ -600,6 +601,17 @@ class HunterExecutor:
     async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> Any:
         """Call any Hunter tool, surviving dropped sessions like :meth:`run` does."""
         return await self._call(lambda c: c.call_tool(name, dict(arguments)))
+
+    async def relationship_catalog(self) -> dict[str, bool] | None:
+        """Relationship kinds the tenant knows and whether each is traversable (None if unavailable)."""
+        try:
+            result = await self._call(lambda c: c.read_resource(GRAPH_CAPABILITIES_URI))
+            text = "".join(getattr(part, "text", "") or "" for part in result.contents)
+            kinds = json.loads(text).get("relationship_kinds") or []
+            return {str(k["name"]): bool(k.get("traversable")) for k in kinds if k.get("name")}
+        except Exception as exc:
+            log.warning("Could not read %s: %s", GRAPH_CAPABILITIES_URI, exc)
+            return None
 
     async def aclose(self) -> None:
         if self._session is not None:

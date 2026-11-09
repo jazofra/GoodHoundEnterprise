@@ -52,6 +52,14 @@ def _summary(r: AnalysisResult) -> list[tuple[str, str]]:
         ]
         if _probability_model(r) and h.get("previous_exposure") is not None:
             rows.append(("Exposure at previous run", f"{h['previous_exposure']}%"))
+    if r.opengraph:
+        extensions = ", ".join(f"{p} ({len(k)} kinds)" for p, k in r.opengraph.items())
+        if r.dual_control_platforms:
+            extensions += (
+                f"; {r.dual_control_platforms} dual-control platforms "
+                f"(x{r.settings.dual_control_probability} per approval)"
+            )
+        rows.append(("OpenGraph edges traversed", extensions))
     if r.skipped_start_nodes:
         rows.append(
             (
@@ -234,6 +242,8 @@ def to_json(r: AnalysisResult) -> str:
         "exposure": r.exposure,
         "exposure_is_estimate": r.exposure_is_estimate,
         "skipped_start_nodes": r.skipped_start_nodes,
+        "opengraph": r.opengraph,
+        "dual_control_platforms": r.dual_control_platforms,
         "single_path_fallbacks": r.single_path_fallbacks,
         "settings": {
             "target_label": r.settings.target_label,
@@ -244,6 +254,8 @@ def to_json(r: AnalysisResult) -> str:
             "session_half_life_days": r.settings.session_half_life_days,
             "all_shortest_paths": r.settings.all_shortest_paths,
             "reuse_suffixes": r.settings.reuse_suffixes,
+            "opengraph": r.settings.opengraph,
+            "dual_control_probability": r.settings.dual_control_probability,
         },
         "busiest_paths": [path_dict(p) for p in r.busiest],
         "weakest_links": [

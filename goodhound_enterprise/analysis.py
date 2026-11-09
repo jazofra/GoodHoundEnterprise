@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 
 from . import cypher
 from .backends.base import QueryError, RetryableQueryError
-from .config import REMEDIATION_HINTS, Settings
+from .config import DUAL_CONTROL_GATED_EDGES, REMEDIATION_HINTS, Settings
 from .graph import AttackPath, Hop, Node
 from .risk import AttackGraph, EdgeKey, GEdge, Reach, RiskContext, distinct_exposure
 from .source import CypherGraphSource
@@ -109,6 +109,9 @@ class AnalysisResult:
     skipped_start_nodes: list[str] = field(default_factory=list)
     # Start nodes analysed with shortestPath because allShortestPaths timed out: reach may be low.
     single_path_fallbacks: list[str] = field(default_factory=list)
+    # OpenGraph extension prefix -> relationship kinds traversed in this run.
+    opengraph: dict[str, list[str]] = field(default_factory=dict)
+    dual_control_platforms: int = 0
 
     @property
     def total_paths(self) -> int:
@@ -241,9 +244,18 @@ async def _discover_users(
             if not neighbour.objectid or not neighbour.kind:
                 continue
             p = ctx.edge_probability(edge, neighbour)
+            gate = ctx.approval_gate(edge, neighbour) or (None, 1.0)
             nodes[neighbour.objectid] = neighbour
             edges.append(
-                GEdge(user.objectid, neighbour.objectid, edge.kind, p, settings.cost(edge.kind, neighbour.kind))
+                GEdge(
+                    user.objectid,
+                    neighbour.objectid,
+                    edge.kind,
+                    p,
+                    settings.cost(edge.kind, neighbour.kind),
+                    None,
+                    *gate,
+                )
             )
             if neighbour.tier_zero or settings.max_hops <= 1:
                 continue
@@ -387,7 +399,15 @@ async def analyse(
     settings = source.settings
     progress = progress or (lambda msg: log.info(msg))
     started = datetime.now(UTC)
-    ctx = RiskContext(settings, started)
+    opengraph: dict[str, list[str]] = {}
+    dual_control: frozenset[tuple[str, str]] = frozenset()
+    if settings.opengraph:
+        progress(f"Resolving OpenGraph relationship kinds for {', '.join(settings.opengraph)}")
+        opengraph = await source.enable_opengraph()
+        if any(k in DUAL_CONTROL_GATED_EDGES for kinds in opengraph.values() for k in kinds):
+            dual_control = frozenset(await source.dual_control_platforms())
+            progress(f"CyberArk platforms requiring dual control: {len(dual_control)}")
+    ctx = RiskContext(settings, started, dual_control)
 
     progress("Counting enabled non-Tier Zero users")
     total_users, domains = await asyncio.gather(source.count_enabled_users(), source.domains())
@@ -471,4 +491,6 @@ async def analyse(
         exposure_is_estimate=exposure_estimate,
         skipped_start_nodes=sorted(skipped),
         single_path_fallbacks=sorted(set(source.single_path_fallbacks) - set(skipped)),
+        opengraph=opengraph,
+        dual_control_platforms=len(dual_control),
     )

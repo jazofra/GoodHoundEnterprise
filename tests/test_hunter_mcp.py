@@ -263,3 +263,33 @@ async def test_retryable_hunter_problem_raises_retryable_error():
     executor.tool_name, executor.query_arg = "bloodhound_cypher", "query"
     with pytest.raises(RetryableQueryError):
         await executor.run("MATCH (n) RETURN n LIMIT 1")
+
+
+async def test_opengraph_kinds_come_from_the_hunter_capability_catalog():
+    import json as _json
+
+    srv, demo = fake_hunter()
+
+    @srv.resource("hunter://graph/capabilities")
+    def capabilities() -> str:
+        kinds = [
+            {"name": "CyberArk_HasAccessTo", "traversable": True},
+            {"name": "CyberArk_SyncsToGroup", "traversable": True},
+            {"name": "CyberArk_SyncsToADUser", "traversable": True},
+            {"name": "CyberArk_Contains", "traversable": True},
+            {"name": "CyberArk_CanApprove", "traversable": False},
+            {"name": "MSSQL_HasLogin", "traversable": True},
+        ]
+        return _json.dumps({"relationship_kinds": kinds})
+
+    async with Client(srv) as client:
+        executor = HunterExecutor(client)
+        await executor.setup()
+        settings = Settings(rate_limit=0, session_half_life_days=0, opengraph=["CyberArk", "AWS"])
+        source = CypherGraphSource(executor, settings)
+        result = await analyse(source, tenant="fake")
+    enabled = result.opengraph["CyberArk"]
+    assert "CyberArk_HasAccessTo" in enabled and "CyberArk_CanApprove" not in enabled
+    assert "AWS" not in result.opengraph  # no such kinds on the tenant: never sent in a query
+    assert "MSSQL_HasLogin" not in settings.traversable_edges
+    assert "PAM OPERATORS@CONTOSO.LOCAL" in {r.path.start.name for r in result.all_paths}

@@ -9,8 +9,9 @@ from typing import Any
 
 from . import cypher
 from .backends.base import CypherExecutor, QueryError, RateLimiter, RetryableQueryError
-from .config import Settings
+from .config import HUNTER_MAX_LIMIT, OPENGRAPH_EDGE_PROBABILITY, Settings
 from .graph import Edge, Graph, Node, parse_graph
+from .risk import cyberark_platform_key
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +69,45 @@ class CypherGraphSource:
 
     async def count_enabled_users(self) -> int:
         return await self.scalar(cypher.count_enabled_users(self.settings), "total")
+
+    async def enable_opengraph(self) -> dict[str, list[str]]:
+        """Add the traversable relationship kinds of the configured OpenGraph extensions.
+
+        Hunter's capability catalog is authoritative (it also knows kinds this tool has
+        no defaults for). Other backends fall back to the built-in tables. Unknown kinds
+        must never reach a query: Hunter rejects the whole query.
+        """
+        prefixes = [p.rstrip("_") for p in self.settings.opengraph if p]
+        if not prefixes:
+            return {}
+        catalog_fn = getattr(self.executor, "relationship_catalog", None)
+        catalog = await catalog_fn() if catalog_fn else None
+        if catalog is None:
+            catalog = {k: True for k in OPENGRAPH_EDGE_PROBABILITY}
+        enabled: dict[str, list[str]] = {}
+        for prefix in prefixes:
+            kinds = sorted(k for k, traversable in catalog.items() if traversable and k.startswith(f"{prefix}_"))
+            if not kinds:
+                log.warning("No traversable %s_* relationship kinds on this tenant; ignoring it", prefix)
+                continue
+            enabled[prefix] = self.settings.add_edges(kinds)
+        return enabled
+
+    async def dual_control_platforms(self) -> set[tuple[str, str]]:
+        """(platformId, instance) of CyberArk platforms that require dual-control approval."""
+        found: set[tuple[str, str]] = set()
+        after: str | None = None
+        while True:
+            graph = await self.query(cypher.list_nodes("CyberArk_Platform", after))
+            page = sorted((n for n in graph.nodes.values() if n.objectid), key=lambda n: n.objectid)
+            for node in page:
+                if node.properties.get("requireDualControlPasswordAccessApproval") is True:
+                    key = cyberark_platform_key(node.properties.get("platformId"), node.objectid)
+                    if key:
+                        found.add(key)
+            if len(graph.nodes) < HUNTER_MAX_LIMIT or not page:
+                return found
+            after = page[-1].objectid
 
     async def domains(self) -> list[Node]:
         graph = await self.query(cypher.list_domains())
