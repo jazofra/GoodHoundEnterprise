@@ -36,7 +36,7 @@ class CypherGraphSource:
                 self.queries_sent += 1
                 try:
                     raw: Any = await self.executor.run(query)
-                    return parse_graph(raw, self.settings.target_label)
+                    return parse_graph(raw, self.settings.target_label, self.settings.target_objectid)
                 except RetryableQueryError as exc:
                     if attempt == retries:
                         raise

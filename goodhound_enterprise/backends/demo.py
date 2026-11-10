@@ -227,10 +227,10 @@ def _graph(nodes: list[DemoNode], edges: list[tuple[int, str, int]] = (), litera
 
 
 _LIMIT = re.compile(r"LIMIT (\d+)\s*$")
-_ALL_SHORTEST = re.compile(
-    r"allShortestPaths\(\(s:(\w+) \{objectid: '([^']+)'\}\)-\[:([\w|]+)\*1\.\.(\d+)\]->\(t:(\w+)\)\)"
-)
-_SHORTEST = re.compile(r"shortestPath\(\(s:(\w+) \{objectid: '([^']+)'\}\)-\[:([\w|]+)\*1\.\.(\d+)\]->\(t:(\w+)\)\)")
+# Target: a label (Tier Zero) or one object by objectid (--target-objectid).
+_TARGET = r"->\((?:t:(\w+)|t \{objectid: '([^']+)'\})\)\)"
+_ALL_SHORTEST = re.compile(r"allShortestPaths\(\(s:(\w+) \{objectid: '([^']+)'\}\)-\[:([\w|]+)\*1\.\.(\d+)\]" + _TARGET)
+_SHORTEST = re.compile(r"shortestPath\(\(s:(\w+) \{objectid: '([^']+)'\}\)-\[:([\w|]+)\*1\.\.(\d+)\]" + _TARGET)
 
 
 _NODE = re.compile(r"MATCH \(n \{objectid: '([^']+)'\}\) RETURN n")
@@ -246,6 +246,12 @@ class DemoExecutor:
     def __init__(self, graph: DemoGraph | None = None) -> None:
         self.g = graph or build_demo_graph()
         self.log: list[str] = []
+
+    def _target_test(self, target_oid: str | None):
+        if target_oid is None:
+            return lambda nid: self.g.nodes[nid].tier_zero
+        target = self.g.by_oid.get(target_oid)
+        return lambda nid: target is not None and nid == target.id
 
     def _members(self, group_ids: set[int], max_hops: int) -> set[int]:
         seen, users = set(group_ids), set()
@@ -349,7 +355,8 @@ class DemoExecutor:
             return _graph([start, *(g.nodes[d] for _, _, d in edges)], edges)
 
         if m := _ALL_SHORTEST.search(query):
-            label, oid, rels, max_hops, _target = m.groups()
+            label, oid, rels, max_hops, _label, target_oid = m.groups()
+            is_target = self._target_test(target_oid)
             start = g.by_oid.get(oid)
             if start is None or start.kind != label:
                 return _graph([])
@@ -359,7 +366,7 @@ class DemoExecutor:
             while frontier and depth[frontier[0]] < int(max_hops):
                 nxt_frontier = []
                 for cur in frontier:
-                    if g.nodes[cur].tier_zero and cur != start.id:
+                    if is_target(cur) and cur != start.id:
                         continue  # shortest paths stop at their target
                     for kind, nxt in g.out.get(cur, ()):
                         if kind not in allowed:
@@ -371,7 +378,7 @@ class DemoExecutor:
                             parents.setdefault(nxt, []).append((cur, kind))
                 frontier = nxt_frontier
             nodes, edges, budget = {start.id: start}, set(), limit
-            for target in sorted(n for n in depth if n != start.id and g.nodes[n].tier_zero):
+            for target in sorted(n for n in depth if n != start.id and is_target(n)):
                 stack = [target]
                 while stack and budget > 0:
                     cur = stack.pop()
@@ -384,7 +391,8 @@ class DemoExecutor:
             return _graph(list(nodes.values()), sorted(edges))
 
         if m := _SHORTEST.search(query):
-            label, oid, rels, max_hops, target = m.groups()
+            label, oid, rels, max_hops, _label, target_oid = m.groups()
+            is_target = self._target_test(target_oid)
             start = g.by_oid.get(oid)
             if start is None or start.kind != label:
                 return _graph([])
@@ -401,7 +409,7 @@ class DemoExecutor:
                         depth[nxt] = depth[cur] + 1
                         parent[nxt] = (cur, kind)
                         queue.append(nxt)
-            targets = sorted((n for n in depth if n != start.id and g.nodes[n].tier_zero), key=lambda n: depth[n])
+            targets = sorted((n for n in depth if n != start.id and is_target(n)), key=lambda n: depth[n])
             nodes: dict[int, DemoNode] = {start.id: start}
             edges: set[tuple[int, str, int]] = set()
             for t in targets[:limit]:

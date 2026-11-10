@@ -270,6 +270,9 @@ class Settings:
     max_hops: int = HUNTER_MAX_HOPS
     #: Node label that marks the targets (BloodHound Enterprise Tier Zero).
     target_label: str = "Tag_Tier_Zero"
+    #: Measure who can reach this one object instead of the Tier Zero label (its
+    #: inbound exposure), e.g. a sensitive group that is not Tier Zero itself.
+    target_objectid: str | None = None
     #: Restrict start nodes to one domain (``domainsid`` property).
     domain_sid: str | None = None
     #: Also compute paths that start from individual users (GoodHound only did
@@ -340,6 +343,10 @@ class Settings:
     @property
     def traversable_edges(self) -> list[str]:
         return list(dict.fromkeys([*self.edge_costs, *self.edge_probability]))
+
+    @property
+    def target_description(self) -> str:
+        return f"object {self.target_objectid}" if self.target_objectid else self.target_label
 
     @property
     def structural_edges(self) -> frozenset[str]:

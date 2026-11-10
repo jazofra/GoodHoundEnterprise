@@ -33,6 +33,16 @@ group synced into CyberArk retrieves the vaulted password of a Tier Zero admin. 
 is modelled as a shared approval per safe that the attacker must also win. See
 [docs/RISK_MODEL.md](docs/RISK_MODEL.md#opengraph-extensions-cyberark-mssql).
 
+### Exposure of one object
+
+GoodHound looks *outwards* from each group: how many users it puts within reach of Tier Zero. A group with few
+members but powerful rights, such as one that can retrieve vaulted Tier Zero passwords, therefore scores
+low. BloodHound Enterprise's exposure looks *inwards*: who can get into that group. `--target-objectid
+<objectid>` answers that question. Every non-Tier Zero group (and, with `--include-users`, user) is scored
+on its chance of reaching that one object, and the weakest links show which relationship to cut. The
+report's grand totals list the target and the users who are already its members. History is kept
+separately for each target.
+
 ## How it works with Hunter
 
 Hunter is a remote, read-only MCP server at `https://<tenant>/api/v2/hunter/mcp`.
@@ -109,6 +119,7 @@ a fallback route.
 | — | `--risk-model probability\|goodhound`, `--detection`, `--session-half-life`, `--sort probability` |
 | — | `--domain-sid`, `--max-hops` (≤10), `--target-label`, `--include-users`, `--reuse-suffixes`, `--one-path-per-target`, `--concurrency`, `--rate-limit` |
 | — | `--opengraph CyberArk,MSSQL` (also traverse OpenGraph extension edges), `--dual-control-probability` |
+| — | `--target-objectid` (who can reach one object, instead of Tier Zero) |
 
 See [`examples/config.example.toml`](examples/config.example.toml) for the
 edge-cost model.

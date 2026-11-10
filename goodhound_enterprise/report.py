@@ -32,6 +32,12 @@ def _summary(r: AnalysisResult) -> list[tuple[str, str]]:
         ("Generated (UTC)", r.generated_at.strftime("%Y-%m-%d %H:%M")),
         ("Domains", ", ".join(d.display for d in r.domains) or "n/a"),
         ("Risk model", r.settings.risk_model),
+        *([("Target", f"{r.target.display} ({r.target.kind}, {r.target.objectid})")] if r.target else []),
+        *(
+            [("Enabled users already in the target (not counted below)", str(r.target_members))]
+            if r.target_members is not None
+            else []
+        ),
         ("Enabled non-Tier Zero users", str(r.total_enabled_users)),
         ("Non-Tier Zero users with a path", users),
         ("% of enabled non-Tier Zero users with a path", f"{r.percentage_with_path}%"),
@@ -247,6 +253,7 @@ def to_json(r: AnalysisResult) -> str:
         "single_path_fallbacks": r.single_path_fallbacks,
         "settings": {
             "target_label": r.settings.target_label,
+            "target_objectid": r.settings.target_objectid,
             "max_hops": r.settings.max_hops,
             "domain_sid": r.settings.domain_sid,
             "max_path_cost": r.settings.max_path_cost,
@@ -360,7 +367,7 @@ def to_html(r: AnalysisResult) -> str:
 <title>GoodHound Enterprise Report</title><style>{_CSS}</style></head>
 <body><main>
 <h1>GoodHound Enterprise attack path report</h1>
-<p class="sub">{e(r.tenant)} · generated {e(r.generated_at.strftime("%Y-%m-%d %H:%M"))} UTC · targets: {e(r.settings.target_label)} · max {r.settings.max_hops} hops · risk model: {e(r.settings.risk_model)}</p>
+<p class="sub">{e(r.tenant)} · generated {e(r.generated_at.strftime("%Y-%m-%d %H:%M"))} UTC · targets: {e(r.target.display if r.target else r.settings.target_label)} · max {r.settings.max_hops} hops · risk model: {e(r.settings.risk_model)}</p>
 <div class="kpis">{kpis}</div>
 <h2>Busiest paths</h2>
 <div class="card"><table><tr><th>#</th>{busy_head}<th>Path</th></tr>

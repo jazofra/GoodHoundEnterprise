@@ -80,6 +80,12 @@ def list_nodes(label: str, after: str | None) -> str:
     return f"MATCH (n:{_label(label)}){where} RETURN n ORDER BY n.objectid ASC LIMIT {HUNTER_MAX_LIMIT}"
 
 
+def _target(settings: Settings) -> str:
+    if settings.target_objectid:
+        return f"(t {{objectid: {literal(settings.target_objectid)}}})"
+    return f"(t:{_label(settings.target_label)})"
+
+
 def shortest_paths_from(settings: Settings, start_label: str, objectid: str, max_hops: int | None = None) -> str:
     """Shortest paths from one start node to every reachable Tier Zero node.
 
@@ -87,23 +93,21 @@ def shortest_paths_from(settings: Settings, start_label: str, objectid: str, max
     choose the cheapest among the shortest, which is what GoodHound's
     ``min(cost)`` did.
     """
-    tz = _label(settings.target_label)
     rels = rel_types(settings.traversable_edges)
     hops = max_hops or settings.max_hops
     return (
         f"MATCH p=shortestPath((s:{_label(start_label)} {{objectid: {literal(objectid)}}})"
-        f"-[:{rels}*1..{hops}]->(t:{tz})) "
+        f"-[:{rels}*1..{hops}]->{_target(settings)}) "
         f"RETURN p LIMIT {settings.paths_per_start}"
     )
 
 
 def all_shortest_paths_from(settings: Settings, start_label: str, objectid: str, max_hops: int | None = None) -> str:
     """Every shortest path (not one per target) from a start node to Tier Zero."""
-    tz = _label(settings.target_label)
     rels = rel_types(settings.traversable_edges)
     return (
         f"MATCH p=allShortestPaths((s:{_label(start_label)} {{objectid: {literal(objectid)}}})"
-        f"-[:{rels}*1..{max_hops or settings.max_hops}]->(t:{tz})) "
+        f"-[:{rels}*1..{max_hops or settings.max_hops}]->{_target(settings)}) "
         f"RETURN p LIMIT {settings.paths_per_start}"
     )
 
