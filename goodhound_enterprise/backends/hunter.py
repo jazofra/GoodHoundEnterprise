@@ -140,6 +140,24 @@ class FileTokenStorage:
         data["client_info"] = client_info.model_dump(mode="json")
         self._save(data)
 
+    def save_metadata(self, prm: Any, asm: Any) -> None:
+        data = self._load()
+        data["oauth_metadata"] = asm.model_dump(mode="json") if asm is not None else None
+        data["protected_resource_metadata"] = prm.model_dump(mode="json") if prm is not None else None
+        self._save(data)
+
+    def load_metadata(self) -> tuple[Any, Any]:
+        from mcp.shared.auth import OAuthMetadata, ProtectedResourceMetadata
+
+        data = self._load()
+        try:
+            asm = OAuthMetadata.model_validate(data["oauth_metadata"]) if data.get("oauth_metadata") else None
+            raw_prm = data.get("protected_resource_metadata")
+            prm = ProtectedResourceMetadata.model_validate(raw_prm) if raw_prm else None
+        except ValueError:
+            return None, None
+        return prm, asm
+
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)
 
@@ -270,15 +288,36 @@ def _oauth_provider(url: str, storage: FileTokenStorage, callback: BrowserCallba
                 self.context.token_expiry_time = expires_at
             # Refreshing needs the real token endpoint, which the SDK has not discovered yet.
             if self.context.current_tokens is not None and self.context.oauth_metadata is None:
+                prm, asm = await self._discover_or_cached()
+                if prm is not None:
+                    self.context.protected_resource_metadata = prm
+                if asm is not None:
+                    self.context.oauth_metadata = asm
+
+        async def _discover_or_cached(self) -> tuple[Any, Any]:
+            """Discover the metadata, retrying briefly; fall back to the last copy that worked.
+
+            Right after the machine wakes the network may not be up yet. Without the
+            metadata the SDK refreshes at ``<origin>/token`` (404) and asks for a new
+            browser approval, so a transient failure must not drop the endpoint.
+            """
+            for attempt in range(3):
                 try:
                     prm, asm = await _discover(url)
                 except Exception as exc:
-                    log.debug("OAuth metadata discovery failed: %s", exc)
+                    log.warning("OAuth metadata discovery failed (%s); attempt %d of 3", exc, attempt + 1)
                 else:
-                    if prm is not None:
-                        self.context.protected_resource_metadata = prm
                     if asm is not None:
-                        self.context.oauth_metadata = asm
+                        storage.save_metadata(prm, asm)
+                        return prm, asm
+                if attempt < 2:
+                    await asyncio.sleep(2 ** (attempt + 1))
+            prm, asm = storage.load_metadata()
+            if asm is not None:
+                log.warning("Using the cached OAuth metadata (token endpoint %s)", asm.token_endpoint)
+            else:
+                log.warning("No OAuth metadata: refreshing may fail and require a new approval")
+            return prm, asm
 
         async def _adopt_stored_tokens(self) -> None:
             """Use tokens another process saved after ours: Hunter rotates refresh tokens on use."""
