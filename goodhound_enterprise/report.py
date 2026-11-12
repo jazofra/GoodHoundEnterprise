@@ -5,8 +5,9 @@ from __future__ import annotations
 import csv
 import html
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from .analysis import AnalysisResult
 
@@ -56,8 +57,18 @@ def _summary(r: AnalysisResult) -> list[tuple[str, str]]:
             ("% of paths seen before", f"{h.get('pct_seen_before', 0.0)}%"),
             ("Paths no longer seen", str(h.get("resolved_paths", 0))),
         ]
+        if h.get("rerouted_paths"):
+            rows.append(("Start nodes whose most likely path changed", str(h["rerouted_paths"])))
         if _probability_model(r) and h.get("previous_exposure") is not None:
             rows.append(("Exposure at previous run", f"{h['previous_exposure']}%"))
+        if h.get("comparable") is False:
+            rows.append(
+                (
+                    "Trend",
+                    "Analysis settings changed since the previous run: the differences above may come from "
+                    "the settings, not the tenant",
+                )
+            )
     if r.opengraph:
         extensions = ", ".join(f"{p} ({len(k)} kinds)" for p, k in r.opengraph.items())
         if r.dual_control_platforms:
@@ -80,13 +91,26 @@ def _summary(r: AnalysisResult) -> list[tuple[str, str]]:
                 f"{len(r.single_path_fallbacks)}: allShortestPaths timed out, so their reach may be underestimated",
             )
         )
+    if r.possibly_truncated:
+        rows.append(
+            (
+                "Start nodes at the query row limit",
+                f"{len(r.possibly_truncated)}: some of their paths may be missing, so their reach may be "
+                "underestimated",
+            )
+        )
     rows.append(("Queries sent", str(r.queries_sent)))
+    if r.resumed_queries:
+        rows.append(("Answers reused from the interrupted run", str(r.resumed_queries)))
     return rows
 
 
 # Column specs: (header, numeric?, value). One definition drives stdout, md, csv and html.
-def _busy_columns(r: AnalysisResult) -> list[tuple[str, bool, object]]:
-    cols: list[tuple[str, bool, object]] = [
+Column = tuple[str, bool, Callable[[Any], str]]
+
+
+def _busy_columns(r: AnalysisResult) -> list[Column]:
+    cols: list[Column] = [
         ("Starting Node", False, lambda p: p.path.start.display),
         ("Users", True, lambda p: str(p.members)),
         ("% of Users", True, lambda p: f"{p.percentage}%"),
@@ -104,7 +128,7 @@ def _busy_columns(r: AnalysisResult) -> list[tuple[str, bool, object]]:
     return cols
 
 
-def _weak_columns(r: AnalysisResult) -> list[tuple[str, bool, object]]:
+def _weak_columns(r: AnalysisResult) -> list[Column]:
     if _probability_model(r):
         return [
             ("Start Nodes", True, lambda w: str(w.paths)),
@@ -251,6 +275,9 @@ def to_json(r: AnalysisResult) -> str:
         "opengraph": r.opengraph,
         "dual_control_platforms": r.dual_control_platforms,
         "single_path_fallbacks": r.single_path_fallbacks,
+        "possibly_truncated": r.possibly_truncated,
+        "resumed_queries": r.resumed_queries,
+        "settings_fingerprint": r.settings.fingerprint(),
         "settings": {
             "target_label": r.settings.target_label,
             "target_objectid": r.settings.target_objectid,
@@ -386,6 +413,18 @@ def to_html(r: AnalysisResult) -> str:
 # --------------------------------------------------------------------------
 
 
+def _csv_cell(value: object) -> str:
+    """Stop spreadsheets running a cell as a formula: object names come from the directory,
+    and whoever can rename an object controls them."""
+    text = str(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        try:
+            float(text)  # a plain negative number is harmless
+        except ValueError:
+            return "'" + text
+    return text
+
+
 def write_csv(r: AnalysisResult, out_dir: Path, stem: str) -> list[Path]:
     files = []
     tables = {
@@ -404,7 +443,7 @@ def write_csv(r: AnalysisResult, out_dir: Path, stem: str) -> list[Path]:
         with path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             writer.writerow(headers)
-            writer.writerows(rows)
+            writer.writerows([_csv_cell(c) for c in row] for row in rows)
         files.append(path)
     return files
 

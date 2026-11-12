@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,6 +18,8 @@ from ..analysis import AnalysisResult, PathResult, WeakLink
 from .agent import AgentConfig, AgentRun, TokenBudget, run_agent
 from .gateway import Gateway
 from .prompts import CARD_SCHEMA, LINK_INVESTIGATOR, PATH_VALIDATOR, PLAN_SCHEMA, SYNTHESIZER
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -138,7 +141,11 @@ async def verify(card: Card, gateway: Gateway) -> None:
     """Re-check in code what the agent claimed about existence; flag disagreements."""
     if card.run.output is None:
         return
-    graph = await gateway.source.query(cypher.view_path(card.task.hops))
+    try:
+        graph = await gateway.source.query(cypher.view_path(card.task.hops))
+    except Exception as exc:  # the card is still worth keeping, marked as unchecked
+        card.verified, card.verification_note = None, f"could not be re-checked ({str(exc)[:120]})"
+        return
     exists = len(graph.edges) >= len(card.task.hops)
     claimed = bool(card.data.get("still_exists"))
     if card.data.get("verdict") == "already_fixed" and exists:
@@ -217,16 +224,22 @@ async def run_fleet(
                 return None
             progress(f"Agent {task.item} started: {task.title[:80]}")
             system = LINK_INVESTIGATOR if task.kind == "link" else PATH_VALIDATOR
-            run = await run_agent(
-                client,
-                gateway,
-                name=task.item,
-                system=system,
-                task=task.prompt,
-                schema=CARD_SCHEMA,
-                cfg=worker,
-                budget=budget,
-            )
+            try:
+                run = await run_agent(
+                    client,
+                    gateway,
+                    name=task.item,
+                    system=system,
+                    task=task.prompt,
+                    schema=CARD_SCHEMA,
+                    cfg=worker,
+                    budget=budget,
+                )
+            except Exception as exc:
+                # One agent's failure (API error, rate limit, dropped session) must not discard
+                # the cards the others have already produced.
+                log.warning("Agent %s failed: %r", task.item, exc)
+                run = AgentRun(task.item, worker.model, error=f"{type(exc).__name__}: {str(exc)[:300]}")
             card = Card(task, run)
             await verify(card, gateway)
             status = run.error or f"{card.data.get('verdict')} ({card.verification_note})"
@@ -239,17 +252,21 @@ async def run_fleet(
     plan = plan_error = None
     if any(c.run.output for c in cards):
         progress(f"Synthesizing the remediation plan on {cfg.lead_model}")
-        lead_run = await run_agent(
-            client,
-            None,
-            name="lead",
-            system=SYNTHESIZER,
-            task=synthesis_input(result, cards),
-            schema=PLAN_SCHEMA,
-            cfg=lead,
-            budget=budget,
-        )
-        plan, plan_error = lead_run.output, lead_run.error
+        try:
+            lead_run = await run_agent(
+                client,
+                None,
+                name="lead",
+                system=SYNTHESIZER,
+                task=synthesis_input(result, cards),
+                schema=PLAN_SCHEMA,
+                cfg=lead,
+                budget=budget,
+            )
+            plan, plan_error = lead_run.output, lead_run.error
+        except Exception as exc:  # the cards are still written
+            log.warning("The lead agent failed: %r", exc)
+            plan_error = f"the lead agent failed: {str(exc)[:300] or type(exc).__name__}"
     else:
         plan_error = "no analyst card was produced"
     return FleetResult(result, cfg, cards, plan, plan_error, budget, gateway, skipped)

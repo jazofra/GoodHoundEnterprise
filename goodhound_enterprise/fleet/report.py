@@ -107,7 +107,7 @@ def to_markdown(fr: FleetResult) -> str:
             out += [f"_Agent failed: {_md(c.run.error)}_", ""]
             continue
         out += [
-            f"**{VERDICT_LABEL.get(d.get('verdict'), d.get('verdict'))}** ({d.get('confidence')} confidence) · "
+            f"**{VERDICT_LABEL.get(str(d.get('verdict')), d.get('verdict'))}** ({d.get('confidence')} confidence) · "
             f"verification: {_md(_verification(c))}",
             "",
             _md(d.get("headline", "")),
@@ -154,7 +154,7 @@ def to_html(fr: FleetResult) -> str:
         else:
             evidence = "".join(f"<li>{e(x)}</li>" for x in d.get("evidence", []))
             body = (
-                f"<p><span class='edge'>{e(VERDICT_LABEL.get(d.get('verdict'), str(d.get('verdict'))))}</span> "
+                f"<p><span class='edge'>{e(VERDICT_LABEL.get(str(d.get('verdict')), str(d.get('verdict'))))}</span> "
                 f"{e(str(d.get('confidence')))} confidence · {e(_verification(c))}</p>"
                 f"<p><b>{e(d.get('headline', ''))}</b></p><p>{e(d.get('analysis', ''))}</p>"
                 f"<table class='summary'><tr><th>Recommended change</th><td>{e(d.get('recommended_change', ''))}</td></tr>"

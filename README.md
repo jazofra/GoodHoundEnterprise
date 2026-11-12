@@ -61,6 +61,14 @@ those rules, so this tool runs many small, bounded queries instead:
 
 Every query is checked against Hunter's rules before it is sent.
 
+### Interrupted runs
+
+A large tenant needs one query per group, so a run can take hours. Every answer is kept in
+`goodhound-enterprise.checkpoint.db` while the run is in progress. If the run is interrupted, repeat
+the same command with `--resume`: answers less than 24 hours old are reused and only the remaining
+queries are sent. The file holds tenant data, so it is created with mode 0600 and removed when the
+run completes. `--checkpoint PATH` moves it and `--no-checkpoint` keeps nothing on disk.
+
 ## Quick start
 
 ```bash
@@ -120,6 +128,7 @@ a fallback route.
 | — | `--domain-sid`, `--max-hops` (≤10), `--target-label`, `--include-users`, `--reuse-suffixes`, `--one-path-per-target`, `--concurrency`, `--rate-limit` |
 | — | `--opengraph CyberArk,MSSQL` (also traverse OpenGraph extension edges), `--dual-control-probability` |
 | — | `--target-objectid` (who can reach one object, instead of Tier Zero) |
+| — | `--resume`, `--checkpoint`, `--no-checkpoint` (continue an interrupted run) |
 
 See [`examples/config.example.toml`](examples/config.example.toml) for the
 edge-cost model.
@@ -174,6 +183,7 @@ goodhound_enterprise/
   cypher.py       query builders + assert_hunter_safe()
   graph.py        BloodHound unified-graph parsing, local cheapest-shortest path
   history.py      SQLite runs / paths / observations
+  checkpoint.py   answers of the run in progress, for --resume
   report.py       stdout, md, csv, html, json
   backends/       hunter (MCP + OAuth), rest (HMAC API token), demo (synthetic AD)
   fleet/          gateway (agents' read-only tools), agent loop, orchestrator, prompts, plan report
@@ -181,7 +191,11 @@ tests/            unit tests + fake Hunter server (in-process and over HTTP) + s
 docs/FEASIBILITY.md, docs/RISK_MODEL.md, docs/FLEET.md
 ```
 
-Run the tests with `pytest`.
+Run the checks that CI runs (`.github/workflows/ci.yml`) with:
+
+```bash
+ruff check . && ruff format --check . && mypy && pytest
+```
 
 ## Credits
 

@@ -20,7 +20,7 @@ from typing import Any
 from .base import QueryError
 
 CYPHER_PATH = "/api/v2/graphs/cypher"
-EMPTY = {"data": {"nodes": {}, "edges": [], "literals": []}}
+EMPTY: dict[str, Any] = {"data": {"nodes": {}, "edges": [], "literals": []}}
 
 
 def sign_request(

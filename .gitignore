@@ -7,4 +7,8 @@ dist/
 .pytest_cache/
 goodhound.db
 goodhound-enterprise.db
+goodhound-enterprise.checkpoint.db
+.coverage
+.mypy_cache/
+.ruff_cache/
 ghe-reports/

@@ -10,6 +10,8 @@ from a TOML file (see ``examples/config.example.toml``).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -214,6 +216,29 @@ DUAL_CONTROL_GATED_EDGES = frozenset({"CyberArk_HasAccessTo", "CyberArk_CanGrant
 
 RISK_MODELS = ("probability", "goodhound")
 
+# Simple settings by type, so a wrong type in the TOML file is reported by name.
+_INT_SETTINGS = (
+    "default_cost",
+    "max_hops",
+    "page_size",
+    "paths_per_start",
+    "concurrency",
+    "exact_path_limit",
+    "monte_carlo_samples",
+    "exposure_levels",
+)
+_NUMBER_SETTINGS = (
+    "rate_limit",
+    "default_probability",
+    "per_action_detection",
+    "session_half_life_days",
+    "dual_control_probability",
+)
+_BOOL_SETTINGS = ("include_users", "all_shortest_paths", "reuse_suffixes")
+_TEXT_SETTINGS = ("target_label", "target_objectid", "domain_sid", "risk_model")
+#: Settings that change how fast a run goes but not what it finds.
+_THROUGHPUT_SETTINGS = frozenset({"concurrency", "rate_limit", "page_size"})
+
 # GoodHound priced some rights higher when the target is a Domain object.
 # Keys are "EdgeKind->TargetKind".
 DEFAULT_TARGETED_COSTS: dict[str, int] = {
@@ -317,7 +342,43 @@ class Settings:
     #: requires dual control: the attacker must also compromise or deceive an approver.
     dual_control_probability: float = 0.25
 
+    def _check_types(self) -> None:
+        def is_number(value: object) -> bool:
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+        for name in _INT_SETTINGS:
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"{name} must be a whole number, got {value!r}")
+        for name in _NUMBER_SETTINGS:
+            if not is_number(getattr(self, name)):
+                raise ValueError(f"{name} must be a number, got {getattr(self, name)!r}")
+        for name in _BOOL_SETTINGS:
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be true or false, got {getattr(self, name)!r}")
+        for name in _TEXT_SETTINGS:
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"{name} must be text, got {value!r}")
+        if not isinstance(self.opengraph, list) or not all(isinstance(p, str) for p in self.opengraph):
+            raise ValueError(f"opengraph must be a list of names, got {self.opengraph!r}")
+        tables = {
+            "edges": self.edge_costs,
+            "targeted_edges": self.targeted_costs,
+            "edge_probability": self.edge_probability,
+            "targeted_edge_probability": self.targeted_probability,
+        }
+        for table, values in tables.items():
+            if not isinstance(values, dict):
+                raise ValueError(f"[{table}] must be a table of relationship kind = value")
+            whole = table in ("edges", "targeted_edges")  # costs
+            for kind, value in values.items():
+                if not is_number(value) or (whole and not isinstance(value, int)):
+                    kind_of = "a whole number" if whole else "a number"
+                    raise ValueError(f"[{table}] {kind} must be {kind_of}, got {value!r}")
+
     def __post_init__(self) -> None:
+        self._check_types()
         if not 1 <= self.max_hops <= HUNTER_MAX_HOPS:
             raise ValueError(f"max_hops must be between 1 and {HUNTER_MAX_HOPS} (Hunter limit)")
         for name in ("page_size", "paths_per_start"):
@@ -331,6 +392,7 @@ class Settings:
             **self.targeted_probability,
             "default_probability": self.default_probability,
             "per_action_detection": self.per_action_detection,
+            "dual_control_probability": self.dual_control_probability,
         }
         for name, value in probabilities.items():
             if not 0.0 <= float(value) <= 1.0:
@@ -339,6 +401,23 @@ class Settings:
             raise ValueError("session_half_life_days must be >= 0")
         if not 1 <= self.exact_path_limit <= 16:
             raise ValueError("exact_path_limit must be between 1 and 16")
+        if self.concurrency < 1:
+            raise ValueError("concurrency must be at least 1")
+        if self.rate_limit < 0:
+            raise ValueError("rate_limit must be 0 (no limit) or more")
+        for name in ("monte_carlo_samples", "exposure_levels"):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be at least 1")
+
+    def fingerprint(self) -> str:
+        """Hash of every setting that changes what a run finds or how it is scored.
+
+        Two runs are only comparable (trend, new and resolved paths) when it matches.
+        """
+        relevant = {
+            name: getattr(self, name) for name in sorted(self.__dataclass_fields__) if name not in _THROUGHPUT_SETTINGS
+        }
+        return hashlib.sha256(json.dumps(relevant, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
     @property
     def traversable_edges(self) -> list[str]:
@@ -411,8 +490,16 @@ def load_settings(path: str | Path | None, **overrides: object) -> Settings:
     """Build settings from an optional TOML file plus CLI overrides (non-None only)."""
     data: dict[str, object] = {}
     if path:
-        with open(path, "rb") as fh:
-            raw = tomllib.load(fh)
+        try:
+            with open(path, "rb") as fh:
+                raw = tomllib.load(fh)
+        except OSError as exc:
+            raise ValueError(f"Cannot read the config file {path}: {exc.strerror or exc}") from None
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"The config file {path} is not valid TOML: {exc}") from None
+        for table in ("edges", "targeted_edges", "edge_probability", "targeted_edge_probability"):
+            if table in raw and not isinstance(raw[table], dict):
+                raise ValueError(f"[{table}] must be a table of relationship kind = value")
         edges = raw.pop("edges", None)
         targeted = raw.pop("targeted_edges", None)
         replace = bool(raw.pop("replace_default_edges", False))
@@ -421,21 +508,21 @@ def load_settings(path: str | Path | None, **overrides: object) -> Settings:
         data.update(raw)
         if probabilities is not None:
             base_p = {} if replace else dict(DEFAULT_EDGE_PROBABILITY)
-            base_p.update({str(k): float(v) for k, v in probabilities.items()})
+            base_p.update({str(k): v for k, v in probabilities.items()})
             data["edge_probability"] = base_p
         elif replace:
             data["edge_probability"] = {}
         if targeted_p is not None:
             base_tp = dict(DEFAULT_TARGETED_PROBABILITY)
-            base_tp.update({str(k): float(v) for k, v in targeted_p.items()})
+            base_tp.update({str(k): v for k, v in targeted_p.items()})
             data["targeted_probability"] = base_tp
         if edges is not None:
             base = {} if replace else dict(DEFAULT_EDGE_COSTS)
-            base.update({str(k): int(v) for k, v in edges.items()})
+            base.update({str(k): v for k, v in edges.items()})
             data["edge_costs"] = base
         if targeted is not None:
             base_t = dict(DEFAULT_TARGETED_COSTS)
-            base_t.update({str(k): int(v) for k, v in targeted.items()})
+            base_t.update({str(k): v for k, v in targeted.items()})
             data["targeted_costs"] = base_t
     data.update({k: v for k, v in overrides.items() if v is not None})
     known = set(Settings.__dataclass_fields__)

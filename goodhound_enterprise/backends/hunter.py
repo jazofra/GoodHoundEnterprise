@@ -26,6 +26,7 @@ import time
 import webbrowser
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from functools import partial
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,39 @@ from urllib.parse import parse_qs, urlparse
 from .base import QueryError, RetryableQueryError
 
 log = logging.getLogger(__name__)
+
+
+def _try_lock(fd: int) -> bool:
+    """Take an exclusive lock on ``fd`` without blocking; False if another process holds it."""
+    try:
+        import fcntl
+    except ImportError:  # Windows
+        import msvcrt
+
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined,unused-ignore]
+        except OSError:
+            return False
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _release_lock(fd: int) -> None:
+    try:
+        import fcntl
+    except ImportError:  # Windows
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined,unused-ignore]
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
 
 # JSON-RPC code the MCP SDK uses when the session's connection has gone away.
 MCP_CONNECTION_CLOSED = -32000
@@ -87,30 +121,25 @@ class FileTokenStorage:
     async def lock(self) -> int:
         """Wait until this process holds the cache's refresh lock (shared by every process using it).
 
-        Polls a non-blocking flock on the event loop rather than blocking a worker
+        Polls a non-blocking lock on the event loop rather than blocking a worker
         thread: a cancelled waiter must never end up holding the lock.
         """
-        import fcntl
-
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(self.path.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    return fd
-                except BlockingIOError:
-                    await asyncio.sleep(0.05)
+            while not _try_lock(fd):
+                await asyncio.sleep(0.05)
+            return fd
         except BaseException:
             os.close(fd)
             raise
 
     @staticmethod
     def unlock(fd: int) -> None:
-        import fcntl
-
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        try:
+            _release_lock(fd)
+        finally:
+            os.close(fd)
 
     @property
     def expires_at(self) -> float | None:
@@ -369,7 +398,7 @@ def _oauth_provider(url: str, storage: FileTokenStorage, callback: BrowserCallba
 
     metadata = OAuthClientMetadata(
         client_name="GoodHound Enterprise",
-        redirect_uris=[callback.redirect_uri],
+        redirect_uris=[callback.redirect_uri],  # type: ignore[list-item]  # validated into AnyUrl
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],
         token_endpoint_auth_method="none",
@@ -439,6 +468,10 @@ def _result_payload(result: Any) -> Any:
         return json.loads(joined)
     except ValueError:
         return {"text": joined}
+
+
+async def _list_tools_page(client: Any, *, cursor: str | None) -> Any:
+    return await client.list_tools(cursor=cursor)
 
 
 class HunterSessionLost(ConnectionError):
@@ -582,7 +615,7 @@ class HunterExecutor:
         tools: list[Any] = []
         cursor = None
         while True:
-            page = await self._call(lambda c, cur=cursor: c.list_tools(cursor=cur))
+            page = await self._call(partial(_list_tools_page, cursor=cursor))
             tools.extend(page.tools)
             cursor = getattr(page, "next_cursor", None)
             if not cursor:
@@ -598,9 +631,8 @@ class HunterExecutor:
         if self.tool_name is None:
             await self.setup()
         assert self.tool_name and self.query_arg
-        result = await self._call(
-            lambda c: c.call_tool(self.tool_name, {**self._extra, self.query_arg: query})  # type: ignore[arg-type]
-        )
+        tool, arguments = self.tool_name, {**self._extra, self.query_arg: query}
+        result = await self._call(lambda c: c.call_tool(tool, arguments))
         payload = _result_payload(result)
         if result.is_error:
             problem = payload.get("problem") if isinstance(payload, dict) else None

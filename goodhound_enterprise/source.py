@@ -9,48 +9,72 @@ from typing import Any
 
 from . import cypher
 from .backends.base import CypherExecutor, QueryError, RateLimiter, RetryableQueryError
+from .checkpoint import Checkpoint
 from .config import HUNTER_MAX_LIMIT, OPENGRAPH_EDGE_PROBABILITY, Settings
-from .graph import Edge, Graph, Node, parse_graph
+from .graph import Edge, Graph, Node, parse_graph, reaches_path_limit
 from .risk import cyberark_platform_key
 
 log = logging.getLogger(__name__)
 
 
 class CypherGraphSource:
-    def __init__(self, executor: CypherExecutor, settings: Settings, *, retries: int = 3) -> None:
+    def __init__(
+        self,
+        executor: CypherExecutor,
+        settings: Settings,
+        *,
+        retries: int = 3,
+        checkpoint: Checkpoint | None = None,
+    ) -> None:
         self.executor = executor
         self.settings = settings
         self.retries = retries
+        #: Answers of an interrupted run (see checkpoint.py). Set to None for live-only queries.
+        self.checkpoint = checkpoint
         self._sem = asyncio.Semaphore(settings.concurrency)
         self._limiter = RateLimiter(settings.rate_limit)
         self.queries_sent = 0
         self._all_shortest_unsupported = False
         self.single_path_fallbacks: list[str] = []
+        #: Start nodes whose result may have been cut off at Hunter's row limit.
+        self.possibly_truncated: list[str] = []
+
+    async def throttle(self) -> None:
+        """Wait for a slot under the shared rate limit (for calls that do not go through ``query``)."""
+        await self._limiter.wait()
 
     async def query(self, query: str, *, retries: int | None = None) -> Graph:
         retries = retries or self.retries
         cypher.assert_hunter_safe(query, self.settings.max_hops)
-        async with self._sem:
-            for attempt in range(1, retries + 1):
+        if self.checkpoint is not None:
+            stored = self.checkpoint.get(query)
+            if stored is not Checkpoint.MISSING:
+                return parse_graph(stored, self.settings.target_label, self.settings.target_objectid)
+        for attempt in range(1, retries + 1):
+            async with self._sem:
                 await self._limiter.wait()
                 self.queries_sent += 1
                 try:
                     raw: Any = await self.executor.run(query)
-                    return parse_graph(raw, self.settings.target_label, self.settings.target_objectid)
                 except RetryableQueryError as exc:
                     if attempt == retries:
                         raise
-                    backoff = 2**attempt
-                    log.warning("Query failed (%s); retrying in %ss", str(exc)[:200], backoff)
-                    await asyncio.sleep(backoff)
+                    problem = str(exc)[:200]
                 except QueryError:
                     raise
                 except Exception as exc:  # transport hiccup, 429, timeout...
                     if attempt == retries:
                         raise
-                    backoff = 2**attempt
-                    log.warning("Query failed (%s); retrying in %ss", exc, backoff)
-                    await asyncio.sleep(backoff)
+                    problem = str(exc)[:200]
+                else:
+                    graph = parse_graph(raw, self.settings.target_label, self.settings.target_objectid)
+                    if self.checkpoint is not None:
+                        self.checkpoint.put(query, raw)
+                    return graph
+            # Back off outside the semaphore: a waiting retry must not hold up other queries.
+            backoff = 2**attempt
+            log.warning("Query failed (%s); retrying in %ss", problem, backoff)
+            await asyncio.sleep(backoff)
         raise AssertionError("unreachable")
 
     async def scalar(self, query: str, key: str) -> int:
@@ -139,7 +163,10 @@ class CypherGraphSource:
             query = cypher.all_shortest_paths_from(self.settings, start_label, start.objectid, max_hops)
             try:
                 # A timed-out allShortestPaths rarely succeeds on retry; shortestPath is cheaper.
-                return await self.query(query, retries=1)
+                graph = await self.query(query, retries=1)
+                if reaches_path_limit(graph, start.objectid, self.settings.paths_per_start):
+                    self.possibly_truncated.append(start.objectid)
+                return graph
             except RetryableQueryError as exc:
                 self._single_path_fallback(start, exc)
             except QueryError as exc:
@@ -147,7 +174,10 @@ class CypherGraphSource:
                 log.warning("allShortestPaths rejected (%s); falling back to shortestPath", str(exc)[:200])
             except Exception as exc:  # client-side timeout or transport error
                 self._single_path_fallback(start, exc)
-        return await self.query(cypher.shortest_paths_from(self.settings, start_label, start.objectid, max_hops))
+        graph = await self.query(cypher.shortest_paths_from(self.settings, start_label, start.objectid, max_hops))
+        if reaches_path_limit(graph, start.objectid, self.settings.paths_per_start):
+            self.possibly_truncated.append(start.objectid)
+        return graph
 
     def _single_path_fallback(self, start: Node, exc: BaseException) -> None:
         self.single_path_fallbacks.append(start.objectid)
@@ -162,10 +192,13 @@ class CypherGraphSource:
         start = graph.by_objectid(user.objectid)
         if start is None:
             return []
-        return sorted(
+        hops = sorted(
             ((e, graph.nodes[e.target]) for e in graph.edges if e.source == start.id and e.target in graph.nodes),
             key=lambda kv: (kv[0].kind, kv[1].objectid),
         )
+        if len(hops) >= HUNTER_MAX_LIMIT:  # one row per relationship: the rest was cut off
+            self.possibly_truncated.append(user.objectid)
+        return hops
 
     async def member_count(self, group: Node) -> int:
         return await self.scalar(cypher.member_count(self.settings, group.objectid), "members")

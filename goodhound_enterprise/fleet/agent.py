@@ -116,6 +116,9 @@ async def run_agent(
             continue
         if response.stop_reason == "tool_use":
             calls = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
+            if gateway is None:
+                run.error = "the model asked for a tool but this agent has none"
+                return run
             run.tool_calls += len(calls)
             results = await asyncio.gather(*(gateway.call(name, c.name, c.input) for c in calls))
             content: list[dict[str, Any]] = [

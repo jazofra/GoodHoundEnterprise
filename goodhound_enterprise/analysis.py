@@ -29,12 +29,13 @@ from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from . import cypher
 from .backends.base import QueryError, RetryableQueryError
 from .config import DUAL_CONTROL_GATED_EDGES, REMEDIATION_HINTS, Settings
 from .graph import AttackPath, Hop, Node
-from .risk import AttackGraph, EdgeKey, GEdge, Reach, RiskContext, distinct_exposure
+from .risk import AttackGraph, CountUsers, EdgeKey, GEdge, Reach, RiskContext, distinct_exposure
 from .source import CypherGraphSource
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,15 @@ MAX_SKIPPED_START_NODES = 25
 MAX_SKIPPED_FRACTION = 0.02
 
 ProgressFn = Callable[[str], None]
+
+
+def _check_skipped(skipped: list[str], scanned: int) -> None:
+    """A few slow start nodes are expected; many failures mean an outage, and a run that
+    silently dropped most of them would record a misleading baseline."""
+    if len(skipped) > max(MAX_SKIPPED_START_NODES, scanned * MAX_SKIPPED_FRACTION):
+        raise QueryError(
+            f"{len(skipped)} of {scanned} start nodes failed; aborting rather than reporting partial results"
+        )
 
 
 @dataclass
@@ -104,7 +114,7 @@ class AnalysisResult:
     settings: Settings
     exposure: float | None = None  # expected % of users whose compromise reaches Tier Zero
     exposure_is_estimate: bool = False
-    history: dict[str, object] = field(default_factory=dict)
+    history: dict[str, Any] = field(default_factory=dict)
     # Start nodes whose path query failed after retries: results are a lower bound.
     skipped_start_nodes: list[str] = field(default_factory=list)
     # Start nodes analysed with shortestPath because allShortestPaths timed out: reach may be low.
@@ -112,6 +122,12 @@ class AnalysisResult:
     # OpenGraph extension prefix -> relationship kinds traversed in this run.
     opengraph: dict[str, list[str]] = field(default_factory=dict)
     dual_control_platforms: int = 0
+    #: The (platformId, instance) keys behind that count, for code that rebuilds attack graphs.
+    dual_control_keys: frozenset[tuple[str, str]] = field(default_factory=frozenset, repr=False)
+    # Start nodes whose result reached Hunter's row limit: paths may be missing, reach may be low.
+    possibly_truncated: list[str] = field(default_factory=list)
+    # Queries answered from the checkpoint of an interrupted run (--resume).
+    resumed_queries: int = 0
     # Target-object mode: the target and how many enabled users already hold it as members.
     target: Node | None = None
     target_members: int | None = None
@@ -201,18 +217,17 @@ async def _discover_groups(
     async for page in source.iter_start_pages("Group"):
         await asyncio.gather(*(resolve(n) for n in page))
         scanned += len(page)
-        # A few slow groups are expected; many failures mean an outage, and a run that
-        # silently dropped most groups would record a misleading baseline.
-        if len(skipped) > max(MAX_SKIPPED_START_NODES, scanned * MAX_SKIPPED_FRACTION):
-            raise QueryError(
-                f"{len(skipped)} of {scanned} start nodes failed; aborting rather than reporting partial results"
-            )
+        _check_skipped(skipped, scanned)
         progress(f"Groups scanned: {scanned}, with a path to {settings.target_description}: {len(found)}")
     return found
 
 
 async def _discover_users(
-    source: CypherGraphSource, ctx: RiskContext, known: dict[str, AttackGraph], progress: ProgressFn
+    source: CypherGraphSource,
+    ctx: RiskContext,
+    known: dict[str, AttackGraph],
+    progress: ProgressFn,
+    skipped: list[str],
 ) -> dict[str, AttackGraph]:
     """Attack graphs for paths users hold *in their own right* (first hop is not MemberOf).
 
@@ -225,6 +240,7 @@ async def _discover_users(
     sem = asyncio.Semaphore(settings.concurrency)
     tails: dict[str, asyncio.Future[AttackGraph | None]] = {}
     found: dict[str, AttackGraph] = {}
+    skipped_users: list[str] = []
     scanned = 0
 
     async def fetch_tail(node: Node) -> AttackGraph | None:
@@ -239,6 +255,22 @@ async def _discover_users(
         return tails[node.objectid]
 
     async def resolve(user: Node) -> None:
+        # Like groups: a user whose queries keep failing is skipped, not fatal for the run.
+        try:
+            await explore(user)
+        except QueryError as exc:
+            if not isinstance(exc, RetryableQueryError):
+                raise  # a rejected query is a bug or a policy change, not a slow user
+            skip(user, exc)
+        except Exception as exc:  # transport failures that outlived retries and reconnects
+            skip(user, exc)
+
+    def skip(user: Node, exc: BaseException) -> None:
+        skipped_users.append(user.objectid)
+        skipped.append(user.objectid)
+        log.warning("Skipping %s: its path query failed (%s)", user.name or user.objectid, str(exc)[:200])
+
+    async def explore(user: Node) -> None:
         async with sem:
             first = await source.first_hops(user)
         nodes: dict[str, Node] = {user.objectid: user}
@@ -275,6 +307,7 @@ async def _discover_users(
     async for page in source.iter_start_pages("User"):
         await asyncio.gather(*(resolve(n) for n in page))
         scanned += len(page)
+        _check_skipped(skipped_users, scanned)
         progress(f"Users scanned: {scanned}, with a direct path to {settings.target_description}: {len(found)}")
     return found
 
@@ -296,6 +329,7 @@ def goodhound_weakest_links(rows: list[PathResult], limit: int) -> list[WeakLink
             exposure[key] += row.members
             sample.setdefault(key, hop)
     total = len(rows) or 1
+    limit = max(0, limit)
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], -exposure[kv[0]], kv[0]))
     return [
         WeakLink(sample[key], n, round(n / total * 100, 1), exposure[key], estimate=True) for key, n in ranked[:limit]
@@ -308,7 +342,7 @@ async def probability_weakest_links(
     settings: Settings,
     total_users: int,
     exposure: float | None,
-    count_users,
+    count_users: CountUsers,
     max_exact_links: int = 60,
 ) -> list[WeakLink]:
     """Rank single relationships by how much tenant exposure disappears when they are removed.
@@ -317,6 +351,8 @@ async def probability_weakest_links(
     users (each user at their best remaining group), which accounts for users who keep another
     path through a different group. A cheap upper bound decides which candidates need scoring.
     """
+    if limit <= 0:
+        return []
     sample: dict[EdgeKey, Hop] = {}
     for row in rows:
         for hop in row.path.hops:
@@ -434,7 +470,7 @@ async def analyse(
     found: dict[str, tuple[AttackGraph, str]] = {oid: (g, "Group") for oid, g in group_graphs.items()}
     if settings.include_users or not found:
         progress("Finding paths users hold in their own right (not via group membership)")
-        user_graphs = await _discover_users(source, ctx, group_graphs, progress)
+        user_graphs = await _discover_users(source, ctx, group_graphs, progress, skipped)
         found.update({oid: (g, "User") for oid, g in user_graphs.items()})
 
     group_ids = [oid for oid, (_, label) in found.items() if label == "Group"]
@@ -491,6 +527,7 @@ async def analyse(
         weakest = goodhound_weakest_links(rows, results)
 
     ranked = sorted(rows, key=SORT_KEYS.get(sort, SORT_KEYS["risk"]))
+    results = max(0, results)
     return AnalysisResult(
         tenant=tenant,
         generated_at=started,
@@ -509,6 +546,9 @@ async def analyse(
         single_path_fallbacks=sorted(set(source.single_path_fallbacks) - set(skipped)),
         opengraph=opengraph,
         dual_control_platforms=len(dual_control),
+        dual_control_keys=dual_control,
+        possibly_truncated=sorted(set(source.possibly_truncated) - set(skipped)),
+        resumed_queries=source.checkpoint.hits if source.checkpoint is not None else 0,
         target=target,
         target_members=target_members,
     )
