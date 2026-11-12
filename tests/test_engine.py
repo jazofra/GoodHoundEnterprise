@@ -358,3 +358,19 @@ async def test_toml_probabilities_override_opengraph_defaults(tmp_path):
     assert added and settings.edge_probability["CyberArk_HasAccessTo"] == 0.5
     assert settings.edge_probability["CyberArk_SomethingNew"] == settings.default_probability
     assert settings.cost("CyberArk_SyncsToADUser") == 0 and settings.probability("CyberArk_SyncsToADUser") == 1.0
+
+
+async def test_target_object_mode_measures_who_can_reach_one_object():
+    sql_admins = f"{DOMAIN_SID}-1204"
+    result, executor = await run_demo(target_objectid=sql_admins, include_users=True)
+    rows = by_start(result)
+    assert result.target.name == "SQL ADMINS@CONTOSO.LOCAL" and result.target_members == 1  # SVC_SQL
+    # DEVELOPERS hold GenericWrite on the group; CONTRACTORS get it through nesting.
+    assert [h.kind for h in rows["DEVELOPERS"].path.hops] == ["GenericWrite"]
+    assert rows["DEVELOPERS"].reach == pytest.approx(WRITE)
+    assert [h.kind for h in rows["CONTRACTORS"].path.hops] == ["MemberOf", "GenericWrite"]
+    # A user who can reset a member's password gets in too.
+    assert [h.kind for h in rows["USER0007"].path.hops] == ["ForceChangePassword", "MemberOf"]
+    assert "SQL ADMINS" not in rows  # the target is not its own start node
+    assert all(f"(t {{objectid: '{sql_admins}'}})" in q for q in executor.log if "hortestPath" in q)
+    assert dict(report._summary(result))["Enabled users already in the target (not counted below)"] == "1"

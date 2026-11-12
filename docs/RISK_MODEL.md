@@ -160,6 +160,13 @@ a dual-control account. CCP retrieval by applications (`CyberArk_CanRetrieveViaC
 because dual control does not apply to it. The approver is not traced as a separate path: if the
 attacker already controls an approver, the real chance is higher than modelled.
 
+## Target-object mode
+
+With `--target-objectid`, the target set is that single object instead of the Tier Zero label. Tier Zero
+nodes on the way become ordinary hops, because whoever reaches Tier Zero can reach the target anyway.
+Reach, risk, exposure and weakest links keep their meaning, applied to "reaching this object". The
+target's current members are reported separately and are not start nodes.
+
 ## Assumptions and limits
 
 - **Independence.** Relationships succeed or fail independently. Correlated defences, such as one EDR

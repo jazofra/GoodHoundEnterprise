@@ -141,6 +141,10 @@ def _add_run_args(run: argparse.ArgumentParser, *, default_formats: str) -> None
     q.add_argument("-c", "--config", type=Path, help="TOML file with edge costs and settings")
     q.add_argument("--max-hops", type=int, help=f"Max path length (1-{HUNTER_MAX_HOPS}, Hunter limit)")
     q.add_argument("--target-label", help="Label of the target zone (default Tag_Tier_Zero)")
+    q.add_argument(
+        "--target-objectid",
+        help="Measure who can reach this one object (its inbound exposure) instead of the target zone",
+    )
     q.add_argument("--domain-sid", help="Only consider start nodes from this domain")
     q.add_argument(
         "--include-users",
@@ -243,9 +247,13 @@ async def open_executor(args: argparse.Namespace):
 
 def _tenant_name(args: argparse.Namespace) -> str:
     if getattr(args, "backend", None) == "demo":
-        return "demo (CONTOSO.LOCAL)"
-    url = args.url if "://" in args.url else f"https://{args.url}"
-    return urlparse(url).hostname or args.url
+        name = "demo (CONTOSO.LOCAL)"
+    else:
+        url = args.url if "://" in args.url else f"https://{args.url}"
+        name = urlparse(url).hostname or args.url
+    # History is keyed by tenant: keep target-object runs apart from Tier Zero runs.
+    target = getattr(args, "target_objectid", None)
+    return f"{name} [target {target}]" if target else name
 
 
 def _settings(args: argparse.Namespace):
@@ -253,6 +261,7 @@ def _settings(args: argparse.Namespace):
         args.config,
         max_hops=args.max_hops,
         target_label=args.target_label,
+        target_objectid=args.target_objectid,
         domain_sid=args.domain_sid,
         include_users=args.include_users,
         concurrency=args.concurrency,
@@ -280,7 +289,7 @@ def _finish_analysis(args: argparse.Namespace, result, formats: list[str], progr
     for path in report.emit(result, formats, args.output_dir):
         progress(f"Wrote {path}")
     if not result.all_paths:
-        progress(f"No paths to {result.settings.target_label}. Congratulations!")
+        progress(f"No paths to {result.settings.target_description}. Congratulations!")
 
 
 async def cmd_run(args: argparse.Namespace) -> int:

@@ -112,6 +112,9 @@ class AnalysisResult:
     # OpenGraph extension prefix -> relationship kinds traversed in this run.
     opengraph: dict[str, list[str]] = field(default_factory=dict)
     dual_control_platforms: int = 0
+    # Target-object mode: the target and how many enabled users already hold it as members.
+    target: Node | None = None
+    target_members: int | None = None
 
     @property
     def total_paths(self) -> int:
@@ -204,7 +207,7 @@ async def _discover_groups(
             raise QueryError(
                 f"{len(skipped)} of {scanned} start nodes failed; aborting rather than reporting partial results"
             )
-        progress(f"Groups scanned: {scanned}, with a path to {settings.target_label}: {len(found)}")
+        progress(f"Groups scanned: {scanned}, with a path to {settings.target_description}: {len(found)}")
     return found
 
 
@@ -272,7 +275,7 @@ async def _discover_users(
     async for page in source.iter_start_pages("User"):
         await asyncio.gather(*(resolve(n) for n in page))
         scanned += len(page)
-        progress(f"Users scanned: {scanned}, with a direct path to {settings.target_label}: {len(found)}")
+        progress(f"Users scanned: {scanned}, with a direct path to {settings.target_description}: {len(found)}")
     return found
 
 
@@ -409,6 +412,19 @@ async def analyse(
             progress(f"CyberArk platforms requiring dual control: {len(dual_control)}")
     ctx = RiskContext(settings, started, dual_control)
 
+    target: Node | None = None
+    target_members: int | None = None
+    if settings.target_objectid:
+        found_target = (await source.query(cypher.node_by_objectid(settings.target_objectid))).by_objectid(
+            settings.target_objectid
+        )
+        if found_target is None:
+            raise QueryError(f"Target object {settings.target_objectid} was not found")
+        target = found_target
+        if target.kind == "Group":
+            target_members = await source.member_count(target)
+        progress(f"Target: {target.display} ({target.kind})")
+
     progress("Counting enabled non-Tier Zero users")
     total_users, domains = await asyncio.gather(source.count_enabled_users(), source.domains())
 
@@ -493,4 +509,6 @@ async def analyse(
         single_path_fallbacks=sorted(set(source.single_path_fallbacks) - set(skipped)),
         opengraph=opengraph,
         dual_control_platforms=len(dual_control),
+        target=target,
+        target_members=target_members,
     )

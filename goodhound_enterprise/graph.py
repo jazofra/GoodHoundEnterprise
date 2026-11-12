@@ -113,17 +113,23 @@ def _find_payload(obj: Any, depth: int = 0) -> Mapping[str, Any] | None:
     return None
 
 
-def _node_from(raw_id: str, raw: Mapping[str, Any], target_label: str) -> Node:
+def _node_from(raw_id: str, raw: Mapping[str, Any], target_label: str, target_objectid: str | None = None) -> Node:
     props = raw.get("properties") or {}
     kinds = tuple(raw.get("kinds") or ([raw["kind"]] if raw.get("kind") else []))
     kind = raw.get("kind") or next((k for k in kinds if k != "Base" and not k.startswith("Tag_")), "") or ""
     system_tags = str(props.get("system_tags") or "")
-    tier_zero = bool(
-        raw.get("isTierZero")
-        or target_label in kinds
-        or (target_label == "Tag_Tier_Zero" and "admin_tier_0" in system_tags)
-    )
     objectid = raw.get("objectId") or raw.get("objectid") or props.get("objectid") or ""
+    # ``tier_zero`` means "is a target". With a single target object, Tier Zero nodes on the
+    # way are ordinary hops (whoever reaches Tier Zero can reach the target anyway).
+    tier_zero = (
+        str(objectid) == target_objectid
+        if target_objectid
+        else bool(
+            raw.get("isTierZero")
+            or target_label in kinds
+            or (target_label == "Tag_Tier_Zero" and "admin_tier_0" in system_tags)
+        )
+    )
     name = raw.get("label") or raw.get("name") or props.get("name") or ""
     return Node(
         id=str(raw.get("id", raw_id)),
@@ -148,7 +154,7 @@ def _literals_from(raw: Any) -> list[tuple[str, Any]]:
     return out
 
 
-def parse_graph(result: Any, target_label: str = "Tag_Tier_Zero") -> Graph:
+def parse_graph(result: Any, target_label: str = "Tag_Tier_Zero", target_objectid: str | None = None) -> Graph:
     """Convert a Cypher result (any supported envelope) into a ``Graph``."""
     payload = _find_payload(result)
     graph = Graph()
@@ -160,7 +166,7 @@ def parse_graph(result: Any, target_label: str = "Tag_Tier_Zero") -> Graph:
     else:
         items = ((str(n.get("id", i)), n) for i, n in enumerate(raw_nodes))
     for raw_id, raw in items:
-        node = _node_from(str(raw_id), raw, target_label)
+        node = _node_from(str(raw_id), raw, target_label, target_objectid)
         graph.nodes[str(raw_id)] = node
     for raw in payload.get("edges") or []:
         source = raw.get("source", raw.get("start", raw.get("from")))

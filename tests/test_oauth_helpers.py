@@ -200,3 +200,37 @@ async def test_rejected_valid_token_falls_back_to_the_full_flow(tmp_path):
     # The SDK flow takes over and resends (and would re-authorize on another 401).
     assert str(resent.url) == MCP_URL
     await flow.aclose()
+
+
+async def test_failed_discovery_falls_back_to_cached_metadata(tmp_path, monkeypatch):
+    import httpx2
+
+    import goodhound_enterprise.backends.hunter as hunter
+    from goodhound_enterprise.backends.hunter import discover_oauth_metadata
+
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(hunter.asyncio, "sleep", lambda _: real_sleep(0))
+    store = await _expired_store(tmp_path)
+    prm, asm = await discover_oauth_metadata(MCP_URL, transport=_metadata_transport())
+    store.save_metadata(prm, asm)  # a previous run discovered it
+
+    async def offline(url):
+        raise httpx2.ConnectError("network is unreachable (machine just woke up)")
+
+    provider = _oauth_provider(MCP_URL, store, BrowserCallback(0, open_browser=False), offline)
+    flow = provider._auth_flow(httpx2.Request("POST", MCP_URL))
+    first = await flow.__anext__()
+    await flow.aclose()
+    assert str(first.url) == TOKEN_ENDPOINT  # not <origin>/token
+
+
+async def test_successful_discovery_is_cached(tmp_path):
+    from goodhound_enterprise.backends.hunter import discover_oauth_metadata
+
+    async def discover(url):
+        return await discover_oauth_metadata(url, transport=_metadata_transport())
+
+    store = await _expired_store(tmp_path)
+    provider = _oauth_provider(MCP_URL, store, BrowserCallback(0, open_browser=False), discover)
+    await provider._initialize()
+    assert str(store.load_metadata()[1].token_endpoint) == TOKEN_ENDPOINT
