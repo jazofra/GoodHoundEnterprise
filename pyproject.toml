@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "goodhound-enterprise"
 dynamic = ["version"]
 description = "GoodHound-style busiest-path and weakest-link prioritisation for BloodHound Enterprise, via the Hunter MCP server (or the BHE REST API)."
 readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=2.3,<3",

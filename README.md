@@ -203,3 +203,7 @@ ruff check . && ruff format --check . && mypy && pytest
 The concept, cost model and risk formula come from
 [GoodHound](https://github.com/idnahacks/GoodHound) by idnahacks. BloodHound and
 Hunter are products of SpecterOps. This project is not affiliated with either.
+
+## Licence
+
+GNU General Public License v3.0, the same licence as GoodHound. See [LICENSE](LICENSE).
