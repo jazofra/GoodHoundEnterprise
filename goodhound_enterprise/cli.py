@@ -195,6 +195,13 @@ def _add_run_args(run: argparse.ArgumentParser, *, default_formats: str) -> None
         help="Fewer queries: intermediate groups reuse another group's path (reach may be underestimated)",
     )
     q.add_argument(
+        "--no-stitch",
+        action="store_false",
+        default=None,
+        dest="stitch",
+        help="Do not join paths longer than the hop limit (saves one query per start node without a path)",
+    )
+    q.add_argument(
         "--one-path-per-target",
         action="store_false",
         default=None,
@@ -340,6 +347,7 @@ def _settings(args: argparse.Namespace):
         per_action_detection=args.per_action_detection,
         session_half_life_days=args.session_half_life_days,
         reuse_suffixes=args.reuse_suffixes,
+        stitch=args.stitch,
         opengraph=[p.strip() for v in args.opengraph for p in v.split(",") if p.strip()] if args.opengraph else None,
         dual_control_probability=args.dual_control_probability,
         all_shortest_paths=args.all_shortest_paths,

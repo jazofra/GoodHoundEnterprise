@@ -112,6 +112,23 @@ def all_shortest_paths_from(settings: Settings, start_label: str, objectid: str,
     )
 
 
+def paths_to_groups(
+    settings: Settings, start_label: str, objectid: str, max_hops: int | None = None, *, all_paths: bool = True
+) -> str:
+    """Shortest paths from one node to the non-Tier Zero groups it reaches within the hop limit.
+
+    Used for stitching: a node with no path to Tier Zero inside the limit may still reach a
+    group that has one (see ``analysis``).
+    """
+    fn = "allShortestPaths" if all_paths else "shortestPath"
+    return (
+        f"MATCH p={fn}((s:{_label(start_label)} {{objectid: {literal(objectid)}}})"
+        f"-[:{rel_types(settings.traversable_edges)}*1..{max_hops or settings.max_hops}]->(w:Group)) "
+        f"WHERE NOT w:{_label(settings.target_label)} AND s <> w "
+        f"RETURN p LIMIT {settings.paths_per_start}"
+    )
+
+
 def first_hops(settings: Settings, user_objectid: str) -> str:
     """A user's outbound attack edges other than group membership."""
     rels = rel_types(e for e in settings.traversable_edges if e != "MemberOf")

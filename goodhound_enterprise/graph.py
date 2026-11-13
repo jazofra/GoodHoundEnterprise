@@ -77,8 +77,16 @@ class Graph:
         self.literals.extend(other.literals)
 
 
-def reaches_path_limit(graph: Graph, start_objectid: str, limit: int, max_steps: int = 50_000) -> bool:
+def reaches_path_limit(
+    graph: Graph,
+    start_objectid: str,
+    limit: int,
+    max_steps: int = 50_000,
+    is_target: Callable[[Node], bool] = lambda node: node.tier_zero,
+) -> bool:
     """Whether a shortest-path result may have been cut off at ``limit`` rows.
+
+    ``is_target`` says which nodes the query's paths end at (Tier Zero by default).
 
     The backend returns the union of the paths, not the rows, so the row count is gone.
     Every returned row is a distinct simple path from the start to a target inside that
@@ -100,7 +108,7 @@ def reaches_path_limit(graph: Graph, start_objectid: str, limit: int, max_steps:
                 continue
             steps += 1
             node = graph.nodes.get(target)
-            if node is not None and node.tier_zero:
+            if node is not None and is_target(node):
                 found += 1
             if found >= limit or steps >= max_steps:
                 return True

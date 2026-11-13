@@ -95,7 +95,10 @@ Roughly `3 + ⌈G/100⌉ + G′ + P` queries, where:
 - `G′ ≤ G` is the number of groups actually queried after suffix reuse,
 - `P` is the number of groups with a path.
 
-A tenant with 5,000 groups therefore needs about 5,000–10,000 small queries. At
+Stitching (on by default, `--no-stitch` to disable) adds one query for every queried group that has
+no path, so up to `G′ − P` more.
+
+Without stitching, a tenant with 5,000 groups needs about 5,000–10,000 small queries. At
 the default 10 queries/s that is about 10–17 minutes. That is fine for a weekly
 or nightly job but slow for interactive use. `--include-users` adds one
 first-hop query per enabled user, plus one per distinct neighbour.

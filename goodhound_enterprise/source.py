@@ -38,6 +38,8 @@ class CypherGraphSource:
         self.single_path_fallbacks: list[str] = []
         #: Start nodes whose result may have been cut off at Hunter's row limit.
         self.possibly_truncated: list[str] = []
+        #: The backend rejected the stitching query: paths beyond the hop limit are not joined.
+        self.stitch_unsupported = False
 
     async def throttle(self) -> None:
         """Wait for a slot under the shared rate limit (for calls that do not go through ``query``)."""
@@ -178,6 +180,53 @@ class CypherGraphSource:
         if reaches_path_limit(graph, start.objectid, self.settings.paths_per_start):
             self.possibly_truncated.append(start.objectid)
         return graph
+
+    async def paths_to_groups(self, start: Node, start_label: str, max_hops: int | None = None) -> Graph | None:
+        """Union of the shortest paths from ``start`` to the non-Tier Zero groups within the hop limit.
+
+        None when the backend rejects the query: stitching is then off for the rest of the run.
+        Prefers every equally short path; when that result may have been cut off at the row
+        limit, one path per group is fetched instead, which covers more groups.
+        """
+        if self.stitch_unsupported:
+            return None
+        variants = [False]
+        if self.settings.all_shortest_paths and not self._all_shortest_unsupported:
+            variants.insert(0, True)
+        for all_paths in variants:
+            query = cypher.paths_to_groups(self.settings, start_label, start.objectid, max_hops, all_paths=all_paths)
+            try:
+                graph = await self.query(query, retries=1 if all_paths else None)
+            except RetryableQueryError:
+                if all_paths:
+                    continue
+                raise
+            except QueryError as exc:
+                if all_paths:
+                    continue  # it may only be allShortestPaths that is refused
+                self.stitch_unsupported = True
+                log.warning(
+                    "The stitching query was rejected (%s); paths longer than %d hops are not joined",
+                    str(exc)[:200],
+                    self.settings.max_hops,
+                )
+                return None
+            except Exception:  # client-side timeout or transport error
+                if all_paths:
+                    continue
+                raise
+            cut = reaches_path_limit(
+                graph,
+                start.objectid,
+                self.settings.paths_per_start,
+                is_target=lambda n: n.kind == "Group" and not n.tier_zero,
+            )
+            if not cut:
+                return graph
+            if not all_paths:
+                self.possibly_truncated.append(start.objectid)
+                return graph
+        raise AssertionError("unreachable")
 
     def _single_path_fallback(self, start: Node, exc: BaseException) -> None:
         self.single_path_fallbacks.append(start.objectid)

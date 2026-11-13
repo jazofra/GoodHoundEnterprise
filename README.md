@@ -33,6 +33,12 @@ group synced into CyberArk retrieves the vaulted password of a Tier Zero admin. 
 is modelled as a shared approval per safe that the attacker must also win. See
 [docs/RISK_MODEL.md](docs/RISK_MODEL.md#opengraph-extensions-cyberark-mssql).
 
+Paths longer than Hunter's 10-hop limit are stitched: a start node with no path inside the limit is
+joined to the groups it reaches that have one, so a long chain of admin rights and sessions that ends
+in such a group is still reported. Start nodes whose search stopped at the limit without finding
+anything are counted in the report. `--no-stitch` turns this off. See
+[docs/RISK_MODEL.md](docs/RISK_MODEL.md#paths-longer-than-10-hops-stitching).
+
 ### Exposure of one object
 
 GoodHound looks *outwards* from each group: how many users it puts within reach of Tier Zero. A group with few
@@ -126,7 +132,7 @@ a fallback route.
 | `-sch` schema file (Cypher writes) | `-c config.toml`: edge costs, target label, limits (read-only) |
 | `--db-skip`, `-sqlpath` | `--db-skip`, `--db` |
 | — | `--risk-model probability\|goodhound`, `--detection`, `--session-half-life`, `--sort probability` |
-| — | `--domain-sid`, `--max-hops` (≤10), `--target-label`, `--include-users`, `--reuse-suffixes`, `--one-path-per-target`, `--concurrency`, `--rate-limit` |
+| — | `--domain-sid`, `--max-hops` (≤10), `--target-label`, `--include-users`, `--reuse-suffixes`, `--no-stitch`, `--one-path-per-target`, `--concurrency`, `--rate-limit` |
 | — | `--opengraph CyberArk,MSSQL` (also traverse OpenGraph extension edges), `--dual-control-probability` |
 | — | `--target-objectid` (who can reach one object, instead of Tier Zero) |
 | — | `--resume`, `--checkpoint`, `--no-checkpoint` (continue an interrupted run) |

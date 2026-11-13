@@ -47,7 +47,8 @@ treating each relationship as an independent event:
   paths. Above that, a seeded Monte Carlo estimate (4,000 samples) is used, so reruns give identical
   numbers.
 
-The visible paths come from `allShortestPaths` (bounded to 10 hops and 100 paths by Hunter). If Hunter
+The visible paths come from `allShortestPaths` (bounded to 10 hops and 100 paths by Hunter; longer
+paths are [stitched](#paths-longer-than-10-hops-stitching)). If Hunter
 rejects that query, the tool falls back to `shortestPath`, which returns one path per target.
 When a start node's result may have been cut off at the 100-row limit, the report counts it under
 "Start nodes at the query row limit": some of its paths may be missing, so its reach may be too low.
@@ -126,6 +127,47 @@ CanRDP = 0.6                    # unpatched hosts, privesc is easy
 "GenericAll->Domain" = 0.8      # cost depends on the target kind
 ```
 
+## Paths longer than 10 hops (stitching)
+
+Hunter rejects traversals over 10 hops, so a start node whose shortest path is longer returns nothing,
+exactly like a start node with no path at all. Deep chains are typical of real exposures: a group is
+local admin on a host, a session there leads to another host, and several such steps later a user is a
+member of a group that reaches Tier Zero, for example through CyberArk.
+
+Stitching closes that gap with one extra query per start node without a path:
+
+1. **Ask what it reaches.** The shortest paths from the start node to the non-Tier Zero groups within
+   10 hops.
+2. **Join.** If one of those groups has an attack graph of its own, the way to the group and the
+   group's graph are merged into one attack graph for the start node. Path probability, reach and
+   weakest links then work as for any other start node; the Hops column shows the real length.
+3. **Repeat on the client.** A stitched group is a waypoint for the groups that were still without a
+   path, until nothing changes. This needs no further queries, so chains of 20, 30 or more hops are
+   followed.
+
+With `--include-users`, a user's first hop is stitched the same way when it has no path within 9 hops.
+
+The report counts the stitched start nodes ("Start nodes with paths over 10 hops") and lists them in the
+JSON (`stitched`, and `stitched: true` on each path).
+
+**Hop-limit warning.** A start node that still has no path, but reaches a group exactly 10 hops away,
+was cut off by the limit: something lies beyond what the query could see. These are counted under
+"Start nodes cut off at the hop limit" (`hop_limited` in the JSON). A longer path cannot be ruled out
+for them.
+
+Limits:
+
+- **A group with a path must sit at least every 10 hops.** A chain of more than 10 hops that passes
+  through no such group is not found. Individual users are not waypoints.
+- **Only start nodes without a path are stitched.** A start node that has a path within 10 hops does
+  not get longer alternatives added, so its reach stays a lower bound.
+- **The warning only looks at groups.** A search that ends 10 hops away at a computer or a user, with
+  no group at that distance, is not flagged.
+- **Cost.** One more query per start node without a path, which is most groups: a run sends up to
+  twice as many path queries. `--no-stitch` (or `stitch = false`) turns stitching and the warning off.
+- **Unverified on a live tenant.** The query uses `shortestPath` to a `Group` label with a `WHERE`
+  clause. If the backend rejects it, the run continues without stitching and the report says so.
+
 ## OpenGraph extensions (CyberArk, MSSQL)
 
 AD paths often continue through other systems. An AD group is synced into a CyberArk group, that group
@@ -174,8 +216,9 @@ target's current members are reported separately and are not start nodes.
 
 - **Independence.** Relationships succeed or fail independently. Correlated defences, such as one EDR
   policy covering every host, make real alternatives less independent than modelled.
-- **Visible paths only.** Paths must be shortest per target, at most 10 hops and at most 100 per start
-  node. Longer detours are not counted, so reach is a lower bound in that sense.
+- **Visible paths only.** Paths must be shortest per target and at most 100 per start node. Paths over
+  10 hops are only found by stitching (above). Longer detours of a start node that already has a path
+  are not counted, so reach is a lower bound in that sense.
 - **Users take their best group.** A user's probability is the best reach among their groups. Combining
   routes from different groups would push it slightly higher, so this too is a lower bound.
 - **User start nodes are estimates.** With `--include-users`, user rows are added on top of the
@@ -190,7 +233,7 @@ target's current members are reported separately and are not start nodes.
   example when a session ages. History counts that as a changed route. A path is "no longer seen"
   only when its start node has no path left, and "new" only when its start node had none before.
 - **Query cost.** The model adds queries: one distinct-user count per reach level, plus a few per scored
-  link. The demo tenant needs 54 queries instead of 23, and a real tenant adds tens to a few hundred to
+  link. The demo tenant needs 56 queries instead of 23 (two of them for stitching), and a real tenant adds tens to a few hundred to
   its thousands of path queries.
 
 ## Legacy mode

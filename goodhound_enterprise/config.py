@@ -234,7 +234,7 @@ _NUMBER_SETTINGS = (
     "session_half_life_days",
     "dual_control_probability",
 )
-_BOOL_SETTINGS = ("include_users", "all_shortest_paths", "reuse_suffixes")
+_BOOL_SETTINGS = ("include_users", "all_shortest_paths", "reuse_suffixes", "stitch")
 _TEXT_SETTINGS = ("target_label", "target_objectid", "domain_sid", "risk_model")
 #: Settings that change how fast a run goes but not what it finds.
 _THROUGHPUT_SETTINGS = frozenset({"concurrency", "rate_limit", "page_size"})
@@ -335,6 +335,10 @@ class Settings:
     #: Reuse an intermediate group's suffix of another group's path instead of
     #: querying it (fewer queries, but its reach can be underestimated).
     reuse_suffixes: bool = False
+    #: Join paths longer than ``max_hops``: a start node with no path inside the limit is
+    #: connected to the groups it reaches that have a path of their own. Costs one extra
+    #: query per start node without a path.
+    stitch: bool = True
     #: OpenGraph extensions to traverse, by relationship-kind prefix (e.g. "CyberArk",
     #: "MSSQL"). The traversable kinds are resolved from the tenant when the run starts.
     opengraph: list[str] = field(default_factory=list)

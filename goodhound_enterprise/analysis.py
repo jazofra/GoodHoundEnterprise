@@ -16,6 +16,14 @@ Pipeline:
 7. Weakest links: the single relationships whose removal lowers that exposure
    the most, computed with distinct users.
 
+Stitching (step 2b). Hunter bounds every traversal to 10 hops, so a longer path
+returns nothing at all. A start node without a path is therefore asked a second
+question: which non-Tier Zero groups does it reach within the limit? If one of
+them has a path of its own, the two are joined into one attack graph. Joined
+groups serve as waypoints in turn, so chains of any length are followed as long
+as a group with a path sits at least every 10 hops. Start nodes that stay
+without a path although their search ran into the limit are reported.
+
 ``risk_model = "goodhound"`` restores GoodHound's original formula
 (fewest-hop path, ``(1 - cost/max_cost) x % users``, links ranked by path count).
 See docs/RISK_MODEL.md.
@@ -26,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter, defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -34,7 +42,7 @@ from typing import Any
 from . import cypher
 from .backends.base import QueryError, RetryableQueryError
 from .config import DUAL_CONTROL_GATED_EDGES, REMEDIATION_HINTS, Settings
-from .graph import AttackPath, Hop, Node
+from .graph import AttackPath, Graph, Hop, Node
 from .risk import AttackGraph, CountUsers, EdgeKey, GEdge, Reach, RiskContext, distinct_exposure
 from .source import CypherGraphSource
 
@@ -67,6 +75,7 @@ class PathResult:
     paths: int = 1  # visible paths (capped at exact_path_limit + 1)
     exact: bool = True  # reach computed exactly (False: Monte Carlo)
     graph: AttackGraph | None = field(default=None, repr=False, compare=False)
+    stitched: bool = False  # every path is longer than the hop limit: joined from two or more queries
 
     @property
     def query(self) -> str:
@@ -126,6 +135,12 @@ class AnalysisResult:
     dual_control_keys: frozenset[tuple[str, str]] = field(default_factory=frozenset, repr=False)
     # Start nodes whose result reached Hunter's row limit: paths may be missing, reach may be low.
     possibly_truncated: list[str] = field(default_factory=list)
+    # Start nodes whose paths are all longer than the hop limit, found by stitching.
+    stitched: list[str] = field(default_factory=list)
+    # Start nodes without a path whose search ran into the hop limit: a longer path cannot be ruled out.
+    hop_limited: list[str] = field(default_factory=list)
+    # The backend rejected the stitching query, so paths beyond the hop limit were not joined.
+    stitch_unavailable: bool = False
     # Queries answered from the checkpoint of an interrupted run (--resume).
     resumed_queries: int = 0
     # Target-object mode: the target and how many enabled users already hold it as members.
@@ -169,8 +184,65 @@ def _in_scope(node: Node, label: str, settings: Settings) -> bool:
     return not (label == "User" and node.properties.get("enabled") is False)
 
 
+@dataclass
+class _Prefix:
+    """What a node without a visible path reaches inside the hop limit: the groups around it."""
+
+    start: Node
+    nodes: dict[str, Node]
+    edges: list[GEdge]
+    groups: frozenset[str]  # non-Tier Zero groups reached: possible waypoints
+    at_limit: bool  # something is exactly ``hops`` away, so the search was cut off there
+
+
+@dataclass
+class _Deep:
+    """Start nodes whose paths are longer than the hop limit: joined, or still unknown."""
+
+    stitched: list[str] = field(default_factory=list)
+    hop_limited: list[str] = field(default_factory=list)
+
+
+def _prefix(ctx: RiskContext, graph: Graph, start: Node, hops: int) -> _Prefix | None:
+    nodes, edges = ctx.edges(graph)
+    groups = frozenset(
+        oid for oid, n in nodes.items() if n.kind == "Group" and not n.tier_zero and oid != start.objectid
+    )
+    if not groups:
+        return None
+    out: dict[str, list[str]] = defaultdict(list)
+    for e in edges:
+        out[e.src].append(e.dst)
+    depth, frontier = {start.objectid: 0}, [start.objectid]
+    while frontier:
+        nxt = [dst for oid in frontier for dst in out[oid] if dst not in depth]
+        for dst in nxt:
+            depth[dst] = depth[frontier[0]] + 1
+        frontier = list(dict.fromkeys(nxt))
+    return _Prefix(start, nodes, edges, groups, max(depth.values()) >= hops)
+
+
+def _stitch(prefix: _Prefix, known: Mapping[str, AttackGraph]) -> AttackGraph | None:
+    """Join a node's way to nearby groups with the attack graphs those groups already have."""
+    waypoints = [known[oid] for oid in sorted(prefix.groups) if oid in known]
+    if not waypoints:
+        return None
+    nodes, edges = dict(prefix.nodes), list(prefix.edges)
+    for graph in waypoints:
+        nodes.update(graph.nodes)
+        edges.extend(graph.edges)
+    return AttackGraph.from_edges(prefix.start, nodes, edges)
+
+
+async def _fetch_prefix(
+    source: CypherGraphSource, ctx: RiskContext, node: Node, label: str, hops: int
+) -> _Prefix | None:
+    graph = await source.paths_to_groups(node, label, hops)
+    return None if graph is None else _prefix(ctx, graph, node, hops)
+
+
 async def _discover_groups(
-    source: CypherGraphSource, ctx: RiskContext, progress: ProgressFn, skipped: list[str]
+    source: CypherGraphSource, ctx: RiskContext, progress: ProgressFn, skipped: list[str], deep: _Deep
 ) -> dict[str, AttackGraph]:
     """Attack graph to Tier Zero for every non-Tier Zero group that has one.
 
@@ -180,6 +252,7 @@ async def _discover_groups(
     settings = source.settings
     found: dict[str, AttackGraph] = {}
     no_path: set[str] = set()
+    pending: dict[str, _Prefix] = {}  # groups without a path, and what they reach (stitching)
     sem = asyncio.Semaphore(settings.concurrency)
     scanned = 0
 
@@ -203,6 +276,15 @@ async def _discover_groups(
         attack_graph = ctx.build(graph, node.objectid)
         if attack_graph is None:
             no_path.add(node.objectid)
+            if settings.stitch:
+                try:
+                    prefix = await _fetch_prefix(source, ctx, node, "Group", settings.max_hops)
+                except Exception as exc:  # the path query worked; only the longer paths are unknown
+                    skipped.append(node.objectid)
+                    log.warning("Skipping %s: its stitching query failed (%s)", node.name or node.objectid, exc)
+                    return
+                if prefix is not None:
+                    pending[node.objectid] = prefix
             return
         found.setdefault(node.objectid, attack_graph)
         if settings.reuse_suffixes:
@@ -219,6 +301,20 @@ async def _discover_groups(
         scanned += len(page)
         _check_skipped(skipped, scanned)
         progress(f"Groups scanned: {scanned}, with a path to {settings.target_description}: {len(found)}")
+
+    # Stitching: a group joined in one round is a waypoint in the next, until nothing changes.
+    # Each round only uses the groups known when it starts, so the result does not depend on order.
+    while pending:
+        joined = {oid: g for oid in sorted(pending) if (g := _stitch(pending[oid], found)) is not None}
+        if not joined:
+            break
+        found.update(joined)
+        deep.stitched.extend(joined)
+        for oid in joined:
+            del pending[oid]
+    deep.hop_limited.extend(oid for oid, prefix in pending.items() if prefix.at_limit)
+    if deep.stitched:
+        progress(f"Groups with a path only beyond {settings.max_hops} hops (stitched): {len(deep.stitched)}")
     return found
 
 
@@ -228,6 +324,7 @@ async def _discover_users(
     known: dict[str, AttackGraph],
     progress: ProgressFn,
     skipped: list[str],
+    deep: _Deep,
 ) -> dict[str, AttackGraph]:
     """Attack graphs for paths users hold *in their own right* (first hop is not MemberOf).
 
@@ -241,13 +338,22 @@ async def _discover_users(
     tails: dict[str, asyncio.Future[AttackGraph | None]] = {}
     found: dict[str, AttackGraph] = {}
     skipped_users: list[str] = []
+    cut_off: set[str] = set()  # neighbours without a path whose search ran into the hop limit
     scanned = 0
 
     async def fetch_tail(node: Node) -> AttackGraph | None:
         if node.objectid in known:
             return known[node.objectid]
-        graph = await source.shortest_paths(node, node.kind, max_hops=settings.max_hops - 1)
-        return ctx.build(graph, node.objectid)
+        hops = settings.max_hops - 1
+        graph = await source.shortest_paths(node, node.kind, max_hops=hops)
+        built = ctx.build(graph, node.objectid)
+        if built is None and settings.stitch:
+            prefix = await _fetch_prefix(source, ctx, node, node.kind, hops)
+            if prefix is not None:
+                built = _stitch(prefix, known)
+                if built is None and prefix.at_limit:
+                    cut_off.add(node.objectid)
+        return built
 
     def tail(node: Node) -> asyncio.Future[AttackGraph | None]:
         if node.objectid not in tails:
@@ -275,6 +381,7 @@ async def _discover_users(
             first = await source.first_hops(user)
         nodes: dict[str, Node] = {user.objectid: user}
         edges: list[GEdge] = []
+        limited = False
         for edge, neighbour in first:
             if not neighbour.objectid or not neighbour.kind:
                 continue
@@ -296,6 +403,7 @@ async def _discover_users(
                 continue
             rest = await tail(neighbour)
             if rest is None:
+                limited = limited or neighbour.objectid in cut_off
                 continue
             nodes.update(rest.nodes)
             # Drop anything that loops back through the user (its own memberships belong to the groups).
@@ -303,6 +411,10 @@ async def _discover_users(
         attack_graph = AttackGraph.from_edges(user, nodes, edges)
         if attack_graph is not None:
             found[user.objectid] = attack_graph
+            if attack_graph.best_path("hops").length > settings.max_hops:
+                deep.stitched.append(user.objectid)
+        elif limited:
+            deep.hop_limited.append(user.objectid)
 
     async for page in source.iter_start_pages("User"):
         await asyncio.gather(*(resolve(n) for n in page))
@@ -466,11 +578,12 @@ async def analyse(
 
     progress("Finding paths from groups to Tier Zero")
     skipped: list[str] = []
-    group_graphs = await _discover_groups(source, ctx, progress, skipped)
+    deep = _Deep()
+    group_graphs = await _discover_groups(source, ctx, progress, skipped, deep)
     found: dict[str, tuple[AttackGraph, str]] = {oid: (g, "Group") for oid, g in group_graphs.items()}
     if settings.include_users or not found:
         progress("Finding paths users hold in their own right (not via group membership)")
-        user_graphs = await _discover_users(source, ctx, group_graphs, progress, skipped)
+        user_graphs = await _discover_users(source, ctx, group_graphs, progress, skipped, deep)
         found.update({oid: (g, "User") for oid, g in user_graphs.items()})
 
     group_ids = [oid for oid, (_, label) in found.items() if label == "Group"]
@@ -480,6 +593,7 @@ async def analyse(
 
     progress("Scoring paths")
     probability_model = settings.risk_model == "probability"
+    stitched = set(deep.stitched)
     rows: list[PathResult] = []
     for oid, (attack_graph, label) in found.items():
         n = members.get(oid, 1) if label == "Group" else 1
@@ -491,7 +605,11 @@ async def analyse(
             if probability_model
             else risk_score(path.cost, pct, settings.max_path_cost)
         )
-        rows.append(PathResult(path, label, n, pct, risk, reach.probability, reach.paths, reach.exact, attack_graph))
+        rows.append(
+            PathResult(
+                path, label, n, pct, risk, reach.probability, reach.paths, reach.exact, attack_graph, oid in stitched
+            )
+        )
 
     # Distinct-user counts, memoised: the same group sets come up for many levels and links.
     cache: dict[frozenset[str], int | None] = {}
@@ -548,6 +666,9 @@ async def analyse(
         dual_control_platforms=len(dual_control),
         dual_control_keys=dual_control,
         possibly_truncated=sorted(set(source.possibly_truncated) - set(skipped)),
+        stitched=sorted(stitched),
+        hop_limited=sorted(set(deep.hop_limited) - set(skipped)),
+        stitch_unavailable=source.stitch_unsupported,
         resumed_queries=source.checkpoint.hits if source.checkpoint is not None else 0,
         target=target,
         target_members=target_members,

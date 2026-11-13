@@ -99,6 +99,24 @@ def _summary(r: AnalysisResult) -> list[tuple[str, str]]:
                 "underestimated",
             )
         )
+    hops = r.settings.max_hops
+    if r.stitched:
+        rows.append(
+            (
+                f"Start nodes with paths over {hops} hops",
+                f"{len(r.stitched)}: joined from several queries (stitched), see the Hops column",
+            )
+        )
+    if r.hop_limited:
+        rows.append(
+            (
+                "Start nodes cut off at the hop limit",
+                f"{len(r.hop_limited)}: no path within {hops} hops, but their search reached that limit, "
+                "so a longer path cannot be ruled out",
+            )
+        )
+    if r.stitch_unavailable:
+        rows.append(("Stitching", f"The backend rejected the stitching query: paths over {hops} hops are not included"))
     rows.append(("Queries sent", str(r.queries_sent)))
     if r.resumed_queries:
         rows.append(("Answers reused from the interrupted run", str(r.resumed_queries)))
@@ -242,6 +260,7 @@ def to_json(r: AnalysisResult) -> str:
             "members": p.members,
             "percentage": p.percentage,
             "hops": p.path.length,
+            "stitched": p.stitched,
             "actions": p.path.actions,
             "cost": p.path.cost,
             "path_probability": round(p.path.probability, 6),
@@ -276,6 +295,9 @@ def to_json(r: AnalysisResult) -> str:
         "dual_control_platforms": r.dual_control_platforms,
         "single_path_fallbacks": r.single_path_fallbacks,
         "possibly_truncated": r.possibly_truncated,
+        "stitched": r.stitched,
+        "hop_limited": r.hop_limited,
+        "stitch_unavailable": r.stitch_unavailable,
         "resumed_queries": r.resumed_queries,
         "settings_fingerprint": r.settings.fingerprint(),
         "settings": {
@@ -288,6 +310,7 @@ def to_json(r: AnalysisResult) -> str:
             "session_half_life_days": r.settings.session_half_life_days,
             "all_shortest_paths": r.settings.all_shortest_paths,
             "reuse_suffixes": r.settings.reuse_suffixes,
+            "stitch": r.settings.stitch,
             "opengraph": r.settings.opengraph,
             "dual_control_probability": r.settings.dual_control_probability,
         },
