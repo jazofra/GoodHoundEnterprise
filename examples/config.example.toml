@@ -34,6 +34,10 @@ all_shortest_paths = true
 # reach can be underestimated.
 reuse_suffixes = false
 
+# Join paths longer than the hop limit: a start node without a path is connected to
+# the groups it reaches that have one. One extra query per start node without a path.
+stitch = true
+
 # Also traverse OpenGraph extension edges, by relationship-kind prefix. The traversable
 # kinds are read from the tenant's Hunter capability catalog at the start of the run.
 # opengraph = ["CyberArk", "MSSQL"]

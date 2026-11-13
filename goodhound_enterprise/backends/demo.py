@@ -234,7 +234,10 @@ _LIMIT = re.compile(r"LIMIT (\d+)\s*$")
 _TARGET = r"->\((?:t:(\w+)|t \{objectid: '([^']+)'\})\)\)"
 _ALL_SHORTEST = re.compile(r"allShortestPaths\(\(s:(\w+) \{objectid: '([^']+)'\}\)-\[:([\w|]+)\*1\.\.(\d+)\]" + _TARGET)
 _SHORTEST = re.compile(r"shortestPath\(\(s:(\w+) \{objectid: '([^']+)'\}\)-\[:([\w|]+)\*1\.\.(\d+)\]" + _TARGET)
-
+# Stitching: shortest paths from one node to the non-Tier Zero groups around it.
+_TO_GROUPS = re.compile(
+    r"(allShortestPaths|shortestPath)\(\(s:(\w+) \{objectid: '([^']+)'\}\)-\[:([\w|]+)\*1\.\.(\d+)\]->\(w:Group\)\)"
+)
 
 _NODE = re.compile(r"MATCH \(n \{objectid: '([^']+)'\}\) RETURN n")
 _VIEW_HOP = re.compile(r"-\[:(\w+)\]->\(n\d+ \{objectid: '([^']+)'\}\)")
@@ -358,6 +361,44 @@ class DemoExecutor:
             allowed = set(rels.split("|"))
             edges = [(start.id, kind, dst) for kind, dst in g.out.get(start.id, ()) if kind in allowed][:limit]
             return _graph([start, *(g.nodes[d] for _, _, d in edges)], edges)
+
+        if m := _TO_GROUPS.search(query):
+            fn, label, oid, rels, max_hops = m.groups()
+            start = g.by_oid.get(oid)
+            if start is None or start.kind != label:
+                return _graph([])
+            allowed, depth = set(rels.split("|")), {start.id: 0}
+            way: dict[int, list[tuple[int, str]]] = {}
+            frontier = [start.id]
+            while frontier and depth[frontier[0]] < int(max_hops):
+                nxt_frontier = []
+                for cur in frontier:
+                    for kind, nxt in g.out.get(cur, ()):
+                        if kind not in allowed:
+                            continue
+                        if nxt not in depth:
+                            depth[nxt] = depth[cur] + 1
+                            nxt_frontier.append(nxt)
+                        if depth[nxt] == depth[cur] + 1:
+                            way.setdefault(nxt, []).append((cur, kind))
+                frontier = nxt_frontier
+            if fn == "shortestPath":  # one path per group
+                way = {n: p[:1] for n, p in way.items()}
+            group_nodes = {start.id: start}
+            group_edges = set()
+            groups = sorted(
+                n for n in depth if n != start.id and g.nodes[n].kind == "Group" and not g.nodes[n].tier_zero
+            )
+            for gid in groups[:limit]:
+                stack = [gid]
+                while stack:
+                    cur = stack.pop()
+                    group_nodes[cur] = g.nodes[cur]
+                    for prev, kind in way.get(cur, ()):
+                        if (prev, kind, cur) not in group_edges:
+                            group_edges.add((prev, kind, cur))
+                            stack.append(prev)
+            return _graph(list(group_nodes.values()), sorted(group_edges))
 
         if m := _ALL_SHORTEST.search(query):
             label, oid, rels, max_hops, _label, target_oid = m.groups()

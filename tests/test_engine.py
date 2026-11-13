@@ -113,10 +113,13 @@ async def test_goodhound_model_reproduces_the_original_numbers():
 
 
 async def test_suffix_reuse_saves_queries_only_when_enabled():
+    def path_queries(executor):
+        return sum("ShortestPaths(" in q and "(w:Group)" not in q for q in executor.log)
+
     _, executor = await run_demo(concurrency=1)
-    assert sum("ShortestPaths(" in q for q in executor.log) == 11  # every non-Tier Zero group
+    assert path_queries(executor) == 11  # every non-Tier Zero group
     result, executor = await run_demo(concurrency=1, reuse_suffixes=True)
-    assert sum("ShortestPaths(" in q for q in executor.log) < 11
+    assert path_queries(executor) < 11
     assert len(result.all_paths) == 9
 
 
@@ -372,5 +375,6 @@ async def test_target_object_mode_measures_who_can_reach_one_object():
     # A user who can reset a member's password gets in too.
     assert [h.kind for h in rows["USER0007"].path.hops] == ["ForceChangePassword", "MemberOf"]
     assert "SQL ADMINS" not in rows  # the target is not its own start node
-    assert all(f"(t {{objectid: '{sql_admins}'}})" in q for q in executor.log if "hortestPath" in q)
+    path_queries = [q for q in executor.log if "hortestPath" in q and "(w:Group)" not in q]
+    assert all(f"(t {{objectid: '{sql_admins}'}})" in q for q in path_queries)
     assert dict(report._summary(result))["Enabled users already in the target (not counted below)"] == "1"

@@ -17,8 +17,9 @@ there:
   counts from BloodHound (no double counting of nested or overlapping groups).
 
 Only relationships the backend returned are visible: Hunter returns shortest
-paths (at most 10 hops), so longer alternatives are not counted and reach
-probabilities are lower bounds in that sense.
+paths (at most 10 hops per query), so longer alternatives are not counted and
+reach probabilities are lower bounds in that sense. Start nodes with no path
+inside that limit are stitched to groups that have one (see ``analysis``).
 """
 
 from __future__ import annotations
@@ -148,26 +149,7 @@ class AttackGraph:
         start = graph.by_objectid(start_objectid)
         if start is None:
             return None
-        allowed_set = set(allowed)
-        nodes = {n.objectid: n for n in graph.nodes.values() if n.objectid}
-        edges = []
-        for e in graph.edges:
-            src, dst = graph.nodes.get(e.source), graph.nodes.get(e.target)
-            if src is None or dst is None or not src.objectid or not dst.objectid or e.kind not in allowed_set:
-                continue
-            g = gate(e, dst) if gate else None
-            edges.append(
-                GEdge(
-                    src.objectid,
-                    dst.objectid,
-                    e.kind,
-                    prob(e, dst),
-                    cost(e.kind, dst.kind),
-                    e.last_seen,
-                    *(g or (None, 1.0)),
-                )
-            )
-        return cls.from_edges(start, nodes, edges)
+        return cls.from_edges(start, *graph_edges(graph, prob, cost, allowed, gate))
 
     def sub(self, objectid: str) -> AttackGraph | None:
         node = self.nodes.get(objectid)
@@ -280,6 +262,36 @@ class AttackGraph:
         return hits / samples if samples else 0.0
 
 
+def graph_edges(
+    graph: Graph,
+    prob: Callable[[Edge, Node], float],
+    cost: Callable[[str, str], int],
+    allowed: Iterable[str],
+    gate: Callable[[Edge, Node], tuple[str, float] | None] | None = None,
+) -> tuple[dict[str, Node], list[GEdge]]:
+    """A query result as objectid-keyed nodes and scored edges (traversable kinds only)."""
+    allowed_set = set(allowed)
+    nodes = {n.objectid: n for n in graph.nodes.values() if n.objectid}
+    edges = []
+    for e in graph.edges:
+        src, dst = graph.nodes.get(e.source), graph.nodes.get(e.target)
+        if src is None or dst is None or not src.objectid or not dst.objectid or e.kind not in allowed_set:
+            continue
+        g = gate(e, dst) if gate else None
+        edges.append(
+            GEdge(
+                src.objectid,
+                dst.objectid,
+                e.kind,
+                prob(e, dst),
+                cost(e.kind, dst.kind),
+                e.last_seen,
+                *(g or (None, 1.0)),
+            )
+        )
+    return nodes, edges
+
+
 def _bits(mask: int) -> list[int]:
     out = []
     while mask:
@@ -357,6 +369,11 @@ class RiskContext:
         instance = target.objectid.rsplit("-", 1)[-1].upper()
         safe = str(target.properties.get("safeName") or target.objectid).lower()
         return f"cyberark-approval:{safe}@{instance}", self.settings.dual_control_probability
+
+    def edges(self, graph: Graph) -> tuple[dict[str, Node], list[GEdge]]:
+        return graph_edges(
+            graph, self.edge_probability, self.settings.cost, self.settings.traversable_edges, self.approval_gate
+        )
 
     def build(self, graph: Graph, start_objectid: str) -> AttackGraph | None:
         return AttackGraph.from_graph(
