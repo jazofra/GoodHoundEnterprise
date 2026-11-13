@@ -1,6 +1,6 @@
 {
   "tenant": "demo (CONTOSO.LOCAL)",
-  "generated_at": "2026-11-06T18:42:59.698870+00:00",
+  "generated_at": "2026-11-06T18:42:59+00:00",
   "summary": {
     "Tenant": "demo (CONTOSO.LOCAL)",
     "Generated (UTC)": "2026-11-06 18:42",
@@ -12,20 +12,30 @@
     "Probability-weighted exposure": "35.84%",
     "Start nodes with a path (total paths)": "9",
     "History": "First run for this tenant: baseline recorded",
-    "Queries sent": "53"
+    "Queries sent": "54"
   },
   "risk_model": "probability",
   "exposure": 35.84,
   "exposure_is_estimate": false,
+  "skipped_start_nodes": [],
+  "opengraph": {},
+  "dual_control_platforms": 0,
+  "single_path_fallbacks": [],
+  "possibly_truncated": [],
+  "resumed_queries": 0,
+  "settings_fingerprint": "7a5f087a14cdabdb",
   "settings": {
     "target_label": "Tag_Tier_Zero",
+    "target_objectid": null,
     "max_hops": 10,
     "domain_sid": null,
     "max_path_cost": 31,
     "per_action_detection": 0.05,
     "session_half_life_days": 14.0,
     "all_shortest_paths": true,
-    "reuse_suffixes": false
+    "reuse_suffixes": false,
+    "opengraph": [],
+    "dual_control_probability": 0.25
   },
   "busiest_paths": [
     {
@@ -109,7 +119,7 @@
       "actions": 2,
       "cost": 4,
       "path_probability": 0.466961,
-      "reach_probability": 0.715869,
+      "reach_probability": 0.71587,
       "visible_paths": 2,
       "reach_exact": true,
       "risk": 7.42,
@@ -201,7 +211,7 @@
       "actions": 2,
       "cost": 4,
       "path_probability": 0.466961,
-      "reach_probability": 0.715869,
+      "reach_probability": 0.71587,
       "visible_paths": 2,
       "reach_exact": true,
       "risk": 5.38,
@@ -392,7 +402,7 @@
       "actions": 2,
       "cost": 4,
       "path_probability": 0.466961,
-      "reach_probability": 0.715869,
+      "reach_probability": 0.71587,
       "visible_paths": 2,
       "reach_exact": true,
       "risk": 7.42,
@@ -484,7 +494,7 @@
       "actions": 2,
       "cost": 4,
       "path_probability": 0.466961,
-      "reach_probability": 0.715869,
+      "reach_probability": 0.71587,
       "visible_paths": 2,
       "reach_exact": true,
       "risk": 5.38,
@@ -700,8 +710,10 @@
     "pct_seen_before": 0.0,
     "resolved_paths": 0,
     "resolved": [],
+    "rerouted_paths": 0,
     "previous_run_at": null,
     "previous_users_with_path": null,
-    "previous_exposure": null
+    "previous_exposure": null,
+    "comparable": true
   }
 }

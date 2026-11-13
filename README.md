@@ -109,6 +109,7 @@ auto-discovery picks the wrong Hunter tool, override it with `--cypher-tool`,
 `--cypher-arg` and `--tool-arg key=value`.
 
 Sample reports from the demo tenant are in [`examples/demo-report/`](examples/demo-report/).
+`python examples/make_demo_reports.py` regenerates them with a fixed clock, so the numbers do not drift.
 `1-baseline.*` is the first run. `2-after-fix.*` is a second run after removing Domain Users'
 RDP right. In the baseline, the two links behind that path top the weakest links at 12.85
 points of exposure each. After the fix, exposure drops from 35.84% to 22.99%, exactly as
