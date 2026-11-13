@@ -190,7 +190,7 @@ target's current members are reported separately and are not start nodes.
   example when a session ages. History counts that as a changed route. A path is "no longer seen"
   only when its start node has no path left, and "new" only when its start node had none before.
 - **Query cost.** The model adds queries: one distinct-user count per reach level, plus a few per scored
-  link. The demo tenant needs 53 queries instead of 23, and a real tenant adds tens to a few hundred to
+  link. The demo tenant needs 54 queries instead of 23, and a real tenant adds tens to a few hundred to
   its thousands of path queries.
 
 ## Legacy mode
