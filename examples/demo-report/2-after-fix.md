@@ -17,7 +17,7 @@
 | % of paths seen before | 100.0% |
 | Paths no longer seen | 1 |
 | Exposure at previous run | 35.84% |
-| Queries sent | 45 |
+| Queries sent | 46 |
 
 ## Busiest paths
 | # | Starting Node | Users | % of Users | Hops | Paths | Path Prob. | Reach Prob. | Risk | Path |

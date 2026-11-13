@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -213,7 +214,9 @@ def _node_json(n: DemoNode) -> dict[str, Any]:
     }
 
 
-def _graph(nodes: list[DemoNode], edges: list[tuple[int, str, int]] = (), literals: list[tuple[str, Any]] = ()):
+def _graph(
+    nodes: Sequence[DemoNode], edges: Sequence[tuple[int, str, int]] = (), literals: Sequence[tuple[str, Any]] = ()
+) -> dict[str, Any]:
     return {
         "data": {
             "nodes": {str(n.id): _node_json(n) for n in nodes},
@@ -274,7 +277,8 @@ class DemoExecutor:
 
     async def run(self, query: str) -> Any:
         self.log.append(query)
-        limit = int(_LIMIT.search(query).group(1)) if _LIMIT.search(query) else 1000
+        limit_match = _LIMIT.search(query)
+        limit = int(limit_match.group(1)) if limit_match else 1000
         g = self.g
 
         if "RETURN count(u) AS total" in query:
@@ -301,9 +305,9 @@ class DemoExecutor:
             return _graph(nodes[:limit])
 
         if m := re.match(r"MATCH \(n:(\w+)\)(?: WHERE n\.objectid > '([^']+)')? RETURN n ORDER BY", query):
-            label, after = m.groups()
+            label, after_oid = m.groups()
             nodes = sorted(
-                (n for n in g.nodes.values() if n.kind == label and (after is None or n.objectid > after)),
+                (n for n in g.nodes.values() if n.kind == label and (after_oid is None or n.objectid > after_oid)),
                 key=lambda n: n.objectid,
             )
             return _graph(nodes[:limit])
@@ -314,18 +318,19 @@ class DemoExecutor:
 
         if query.startswith("MATCH p=(n0 {objectid: "):
             hops = _VIEW_HOP.findall(query)
-            first = g.by_oid.get(re.match(r"MATCH p=\(n0 \{objectid: '([^']+)'\}\)", query).group(1))
+            first_match = re.match(r"MATCH p=\(n0 \{objectid: '([^']+)'\}\)", query)
+            first = g.by_oid.get(first_match.group(1)) if first_match else None
             if first is None:
                 return _graph([])
-            nodes, edges, cur = [first], [], first
+            hop_nodes, hop_edges, at = [first], [], first
             for kind, oid in hops:
-                nxt = g.by_oid.get(oid)
-                if nxt is None or (kind, nxt.id) not in g.out.get(cur.id, []):
+                nxt_node = g.by_oid.get(oid)
+                if nxt_node is None or (kind, nxt_node.id) not in g.out.get(at.id, []):
                     return _graph([])
-                nodes.append(nxt)
-                edges.append((cur.id, kind, nxt.id))
-                cur = nxt
-            return _graph(nodes, edges)
+                hop_nodes.append(nxt_node)
+                hop_edges.append((at.id, kind, nxt_node.id))
+                at = nxt_node
+            return _graph(hop_nodes, hop_edges)
 
         if m := _INBOUND.match(query):
             rels, oid = m.groups()
@@ -377,18 +382,20 @@ class DemoExecutor:
                         if depth[nxt] == depth[cur] + 1:
                             parents.setdefault(nxt, []).append((cur, kind))
                 frontier = nxt_frontier
-            nodes, edges, budget = {start.id: start}, set(), limit
+            found: dict[int, DemoNode] = {start.id: start}
+            found_edges: set[tuple[int, str, int]] = set()
+            budget = limit
             for target in sorted(n for n in depth if n != start.id and is_target(n)):
                 stack = [target]
                 while stack and budget > 0:
                     cur = stack.pop()
-                    nodes[cur] = g.nodes[cur]
+                    found[cur] = g.nodes[cur]
                     for prev, kind in parents.get(cur, ()):
-                        if (prev, kind, cur) not in edges:
-                            edges.add((prev, kind, cur))
+                        if (prev, kind, cur) not in found_edges:
+                            found_edges.add((prev, kind, cur))
                             stack.append(prev)
                 budget -= 1
-            return _graph(list(nodes.values()), sorted(edges))
+            return _graph(list(found.values()), sorted(found_edges))
 
         if m := _SHORTEST.search(query):
             label, oid, rels, max_hops, _label, target_oid = m.groups()
@@ -410,20 +417,22 @@ class DemoExecutor:
                         parent[nxt] = (cur, kind)
                         queue.append(nxt)
             targets = sorted((n for n in depth if n != start.id and is_target(n)), key=lambda n: depth[n])
-            nodes: dict[int, DemoNode] = {start.id: start}
-            edges: set[tuple[int, str, int]] = set()
+            on_path: dict[int, DemoNode] = {start.id: start}
+            path_edges: set[tuple[int, str, int]] = set()
             for t in targets[:limit]:
                 cur = t
                 while cur != start.id:
                     prev, kind = parent[cur]
-                    edges.add((prev, kind, cur))
-                    nodes[cur] = g.nodes[cur]
+                    path_edges.add((prev, kind, cur))
+                    on_path[cur] = g.nodes[cur]
                     cur = prev
-            return _graph(list(nodes.values()), sorted(edges))
+            return _graph(list(on_path.values()), sorted(path_edges))
 
         if "AS members" in query:
-            oid = re.search(r"g:Group \{objectid: '([^']+)'\}", query).group(1)
-            group = g.by_oid[oid]
+            group_match = re.search(r"g:Group \{objectid: '([^']+)'\}", query)
+            if group_match is None or group_match.group(1) not in g.by_oid:
+                return _graph([], literals=[("members", 0)])
+            group = g.by_oid[group_match.group(1)]
             return _graph([], literals=[("members", len(self._members({group.id}, 10)))])
 
         if "AS users" in query:

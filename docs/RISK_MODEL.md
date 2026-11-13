@@ -49,6 +49,9 @@ treating each relationship as an independent event:
 
 The visible paths come from `allShortestPaths` (bounded to 10 hops and 100 paths by Hunter). If Hunter
 rejects that query, the tool falls back to `shortestPath`, which returns one path per target.
+When a start node's result may have been cut off at the 100-row limit, the report counts it under
+"Start nodes at the query row limit": some of its paths may be missing, so its reach may be too low.
+The check cannot miss a cut-off result, but it can flag one that was complete.
 
 **4. Risk of a start node** = `100 × reach × members / enabled non-Tier Zero users`. It is the expected
 percentage of all users whose compromise reaches Tier Zero **through this start node**.
@@ -180,9 +183,14 @@ target's current members are reported separately and are not start nodes.
 - **Sampling error.** Monte Carlo reach (start nodes with more than 12 visible paths) carries about
   ±1.5 points of sampling error at the default 4,000 samples, but it is deterministic between runs.
 - **Comparing runs.** Exposure is comparable between runs only with the same settings. History stores
-  the risk model next to each run and compares exposure only between runs of the same model.
+  a fingerprint of the analysis settings next to each run (everything except concurrency, rate limit
+  and page size). When it differs from the previous run's, the report shows no exposure change and
+  says that the differences may come from the settings.
+- **Changed routes.** A start node's most likely path can change without anything being fixed, for
+  example when a session ages. History counts that as a changed route. A path is "no longer seen"
+  only when its start node has no path left, and "new" only when its start node had none before.
 - **Query cost.** The model adds queries: one distinct-user count per reach level, plus a few per scored
-  link. The demo tenant needs 53 queries instead of 23, and a real tenant adds tens to a few hundred to
+  link. The demo tenant needs 54 queries instead of 23, and a real tenant adds tens to a few hundred to
   its thousands of path queries.
 
 ## Legacy mode

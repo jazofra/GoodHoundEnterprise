@@ -138,11 +138,13 @@ class Gateway:
                 text = text[:MAX_RESULT_CHARS] + '..." [truncated: narrow the request]'
             self.audit.append(AuditEntry(agent, name, arguments, True, int((time.monotonic() - started) * 1000)))
             return text, False
-        except (QueryError, cypher.UnsafeQueryError, ValueError, KeyError) as exc:
+        except Exception as exc:
+            # Whatever went wrong (rejected query, dropped session, bad arguments), the agent gets
+            # an error result it can react to; one failed call must not take the fleet down.
             self.audit.append(
                 AuditEntry(agent, name, arguments, False, int((time.monotonic() - started) * 1000), str(exc)[:300])
             )
-            return json.dumps({"error": str(exc)[:1000]}), True
+            return json.dumps({"error": (str(exc) or type(exc).__name__)[:1000]}), True
 
     async def _query(self, query: str) -> Graph:
         return await self.source.query(query)
@@ -158,7 +160,8 @@ class Gateway:
 
     def _build_tools(self) -> list[Tool]:
         settings = self.source.settings
-        ctx = RiskContext(settings, self.result.generated_at)
+        # Same dual-control platforms as the analysis, so the agents' numbers match the report's.
+        ctx = RiskContext(settings, self.result.generated_at, self.result.dual_control_keys)
         attack_edges = [e for e in settings.traversable_edges if e != "MemberOf"]
         oid = _str("objectid (SID or GUID) exactly as given in the task or a previous tool result")
 
@@ -287,6 +290,7 @@ class Gateway:
             arguments = json.loads(args["arguments_json"] or "{}")
             if not isinstance(arguments, dict):
                 raise ValueError("arguments_json must be a JSON object")
+            await self.source.throttle()  # typed tools share Hunter's rate limit with the queries
             result = await self.hunter.call_tool(name, arguments)
             from ..backends.hunter import _result_payload
 

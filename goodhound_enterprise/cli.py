@@ -20,11 +20,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import __version__, history, report
-from .analysis import analyse
+from .analysis import AnalysisResult, analyse
 from .backends.base import QueryError
+from .checkpoint import Checkpoint
 from .config import HUNTER_MAX_HOPS, load_settings
 from .cypher import UnsafeQueryError
 from .source import CypherGraphSource
+
+DEFAULT_CHECKPOINT = Path("goodhound-enterprise.checkpoint.db")
 
 EPILOG = "Attackers think in graphs, defenders think in actions, management think in charts."
 
@@ -37,6 +40,19 @@ def _kv(value: str) -> tuple[str, Any]:
         return key, json.loads(raw)
     except ValueError:
         return key, raw
+
+
+def _count(minimum: int):
+    def parse(value: str) -> int:
+        try:
+            number = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"expected a whole number, got {value!r}") from None
+        if number < minimum:
+            raise argparse.ArgumentTypeError(f"must be at least {minimum}")
+        return number
+
+    return parse
 
 
 def _add_connection(p: argparse.ArgumentParser, *, backends: bool = True) -> None:
@@ -97,17 +113,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_run_args(fleet, default_formats="html")
     f = fleet.add_argument_group("Agent fleet")
-    f.add_argument("--links", type=int, default=5, help="Weakest links to investigate (one agent each)")
-    f.add_argument("--paths", type=int, default=3, help="Busiest paths to validate (one agent each)")
+    f.add_argument("--links", type=_count(0), default=5, help="Weakest links to investigate (one agent each)")
+    f.add_argument("--paths", type=_count(0), default=3, help="Busiest paths to validate (one agent each)")
     f.add_argument("--worker-model", default="claude-sonnet-5-5", help="Model for the analyst agents")
     f.add_argument("--worker-effort", default="medium", choices=("low", "medium", "high", "xhigh", "max"))
     f.add_argument("--lead-model", default="claude-opus-5-5", help="Model that writes the remediation plan")
     f.add_argument("--lead-effort", default="high", choices=("low", "medium", "high", "xhigh", "max"))
-    f.add_argument("--agents", type=int, default=4, help="Agents running at the same time")
-    f.add_argument("--max-turns", type=int, default=16, help="Model turns per analyst agent")
+    f.add_argument("--agents", type=_count(1), default=4, help="Agents running at the same time")
+    f.add_argument("--max-turns", type=_count(1), default=16, help="Model turns per analyst agent")
     f.add_argument(
         "--token-budget",
-        type=int,
+        type=_count(1),
         default=3_000_000,
         help="Total tokens (input+output+cache) after which no new agent turns start",
     )
@@ -135,7 +151,9 @@ def _add_run_args(run: argparse.ArgumentParser, *, default_formats: str) -> None
         "-o", "--output-format", action="append", choices=report.FORMATS, help=f"Repeatable. Default: {default_formats}"
     )
     o.add_argument("-d", "--output-dir", type=Path, default=Path("ghe-reports"))
-    o.add_argument("-r", "--results", type=int, default=5, help="Rows in the busiest paths / weakest links tables")
+    o.add_argument(
+        "-r", "--results", type=_count(1), default=5, help="Rows in the busiest paths / weakest links tables"
+    )
     o.add_argument("--sort", choices=("risk", "users", "hops", "probability"), default="risk")
     q = run.add_argument_group("Analysis")
     q.add_argument("-c", "--config", type=Path, help="TOML file with edge costs and settings")
@@ -196,11 +214,25 @@ def _add_run_args(run: argparse.ArgumentParser, *, default_formats: str) -> None
         dest="dual_control_probability",
         help="Chance (0-1) of getting a CyberArk dual-control password release approved (default 0.25)",
     )
-    q.add_argument("--concurrency", type=int, help="Parallel queries (default 4)")
+    q.add_argument("--concurrency", type=_count(1), help="Parallel queries (default 4)")
     q.add_argument("--rate-limit", type=float, help="Max queries per second (default 10)")
     d = run.add_argument_group("History")
     d.add_argument("--db", type=Path, default=Path("goodhound-enterprise.db"), help="SQLite history file")
     d.add_argument("--db-skip", action="store_true", help="Do not read or write history")
+    c = run.add_argument_group("Interrupted runs")
+    c.add_argument(
+        "--resume",
+        action="store_true",
+        help="Continue an interrupted run: reuse the answers it already received (up to 24 hours old) "
+        "and only send the remaining queries",
+    )
+    c.add_argument(
+        "--checkpoint",
+        type=Path,
+        help=f"Where answers are kept while a run is in progress (default {DEFAULT_CHECKPOINT}; "
+        "removed when the run completes)",
+    )
+    c.add_argument("--no-checkpoint", action="store_true", help="Keep nothing on disk during the run")
     lg = run.add_argument_group("Logging")
     lg.add_argument("-q", "--quiet", action="store_true")
     lg.add_argument("-v", "--verbose", action="store_true")
@@ -240,9 +272,47 @@ async def open_executor(args: argparse.Namespace):
         cypher_tool=args.cypher_tool,
         cypher_arg=args.cypher_arg,
         extra_args=dict(args.tool_arg),
-    ) as executor:
-        await executor.setup()
-        yield executor
+    ) as hunter:
+        await hunter.setup()
+        yield hunter
+
+
+def _open_checkpoint(args: argparse.Namespace, progress) -> Checkpoint | None:
+    """The store of answers for this run, or None when nothing is kept on disk."""
+    if args.no_checkpoint:
+        if args.resume:
+            raise ValueError("--resume needs the checkpoint: do not combine it with --no-checkpoint")
+        return None
+    path = args.checkpoint
+    if path is None:
+        if args.backend == "demo" and not args.resume:
+            return None  # the built-in data answers instantly: nothing worth keeping
+        path = DEFAULT_CHECKPOINT
+    checkpoint = Checkpoint(path, f"{args.backend}:{_tenant_name(args)}", resume=args.resume)
+    if args.resume:
+        if checkpoint.available:
+            progress(f"Resuming: {checkpoint.available} answers from the interrupted run are reused")
+        else:
+            progress(f"Nothing to resume in {path} (no recent interrupted run for this tenant): starting afresh")
+    return checkpoint
+
+
+async def _analyse(args: argparse.Namespace, source: CypherGraphSource, results: int, progress) -> AnalysisResult:
+    """Run the analysis, keeping its answers on disk until it completes."""
+    checkpoint = _open_checkpoint(args, progress)
+    source.checkpoint = checkpoint
+    try:
+        result = await analyse(source, tenant=_tenant_name(args), results=results, sort=args.sort, progress=progress)
+    except BaseException:
+        if checkpoint is not None:
+            checkpoint.close()
+            progress(f"Stopped before completing: run the same command with --resume to continue ({checkpoint.path})")
+        raise
+    finally:
+        source.checkpoint = None  # anything asked after the analysis must be answered live
+    if checkpoint is not None:
+        checkpoint.complete()
+    return result
 
 
 def _tenant_name(args: argparse.Namespace) -> str:
@@ -297,9 +367,7 @@ async def cmd_run(args: argparse.Namespace) -> int:
     progress = _progress(args)
     async with open_executor(args) as executor:
         source = CypherGraphSource(executor, settings)
-        result = await analyse(
-            source, tenant=_tenant_name(args), results=args.results, sort=args.sort, progress=progress
-        )
+        result = await _analyse(args, source, args.results, progress)
     _finish_analysis(args, result, args.output_format or ["stdout", "html"], progress)
     return 0
 
@@ -332,7 +400,7 @@ async def cmd_fleet(args: argparse.Namespace) -> int:
     async with open_executor(args) as executor:
         source = CypherGraphSource(executor, settings)
         results = max(args.results, args.links, args.paths)
-        result = await analyse(source, tenant=_tenant_name(args), results=results, sort=args.sort, progress=progress)
+        result = await _analyse(args, source, results, progress)
         _finish_analysis(args, result, args.output_format or ["html"], progress)
         tasks = plan_tasks(result, cfg)
         if args.dry_run:
@@ -419,6 +487,9 @@ def main(argv: list[str] | None = None) -> int:
     except (QueryError, UnsafeQueryError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

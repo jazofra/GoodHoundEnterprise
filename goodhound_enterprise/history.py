@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .analysis import AnalysisResult
 
@@ -47,7 +48,7 @@ CREATE TABLE IF NOT EXISTS observations (
 
 # Columns added after the first release; older databases are upgraded in place.
 MIGRATIONS = {
-    "runs": {"exposure": "REAL", "risk_model": "TEXT"},
+    "runs": {"exposure": "REAL", "risk_model": "TEXT", "settings_hash": "TEXT"},
     "observations": {"path_probability": "REAL", "reach": "REAL", "paths": "INTEGER"},
 }
 
@@ -62,23 +63,30 @@ def _migrate(db: sqlite3.Connection) -> None:
 
 @dataclass
 class HistoryDelta:
-    new_paths: int
+    new_paths: int  # start nodes that had no path at the previous run
     seen_before: int
-    resolved: list[tuple[str, str]]  # (start name, path text) present last run, gone now
+    resolved: list[tuple[str, str]]  # (start name, path text): start nodes with a path last run and none now
     previous_run_at: str | None
     previous_users_with_path: int | None
     previous_exposure: float | None = None
+    #: Start nodes that had a path last run and still have one, by a different most likely route
+    #: (for example because a session aged). Nothing was fixed and nothing new appeared.
+    rerouted: int = 0
+    #: False when the previous run used other analysis settings: its numbers are not a trend.
+    comparable: bool = True
 
-    def as_dict(self, total_paths: int) -> dict[str, object]:
+    def as_dict(self, total_paths: int) -> dict[str, Any]:
         return {
             "new_paths": self.new_paths,
             "seen_before": self.seen_before,
             "pct_seen_before": round(self.seen_before / total_paths * 100, 1) if total_paths else 0.0,
             "resolved_paths": len(self.resolved),
             "resolved": self.resolved,
+            "rerouted_paths": self.rerouted,
             "previous_run_at": self.previous_run_at,
             "previous_users_with_path": self.previous_users_with_path,
             "previous_exposure": self.previous_exposure,
+            "comparable": self.comparable,
         }
 
 
@@ -94,18 +102,28 @@ def record(result: AnalysisResult, path: str | Path) -> HistoryDelta:
         _migrate(db)
         now = result.generated_at.isoformat(timespec="seconds")
         model = result.settings.risk_model
+        settings_hash = result.settings.fingerprint()
         prev = db.execute(
-            "SELECT id, generated_at, users_with_path, exposure, risk_model FROM runs "
+            "SELECT id, generated_at, users_with_path, exposure, risk_model, settings_hash FROM runs "
             "WHERE tenant = ? ORDER BY id DESC LIMIT 1",
             (result.tenant,),
         ).fetchone()
-        previous_uids: set[str] = set()
+        # uid -> start node of every path seen at the previous run.
+        previous: dict[str, str] = {}
         if prev:
-            previous_uids = {r[0] for r in db.execute("SELECT uid FROM observations WHERE run_id = ?", (prev[0],))}
+            previous = dict(
+                db.execute(
+                    "SELECT o.uid, p.start_objectid FROM observations o JOIN paths p ON p.uid = o.uid "
+                    "WHERE o.run_id = ? AND p.tenant = ?",
+                    (prev[0], result.tenant),
+                ).fetchall()
+            )
+        previous_uids = set(previous)
+        previous_starts = set(previous.values())
 
         cur = db.execute(
             "INSERT INTO runs (tenant, generated_at, total_enabled_users, users_with_path, total_paths, exposure, "
-            "risk_model) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "risk_model, settings_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 result.tenant,
                 now,
@@ -114,15 +132,22 @@ def record(result: AnalysisResult, path: str | Path) -> HistoryDelta:
                 result.total_paths,
                 result.exposure,
                 model,
+                settings_hash,
             ),
         )
         run_id = cur.lastrowid
-        new = seen = 0
+        new = seen = rerouted = 0
         current: set[str] = set()
+        current_starts: set[str] = set()
         for row in result.all_paths:
             uid = row.path.uid
             current.add(uid)
+            current_starts.add(row.path.start.objectid)
             exists = db.execute("SELECT 1 FROM paths WHERE tenant = ? AND uid = ?", (result.tenant, uid)).fetchone()
+            if uid not in previous_uids and row.path.start.objectid in previous_starts:
+                rerouted += 1  # same start node, different most likely route
+            elif not exists:
+                new += 1
             if exists:
                 seen += 1
                 db.execute(
@@ -130,7 +155,6 @@ def record(result: AnalysisResult, path: str | Path) -> HistoryDelta:
                     (now, row.path.start.display, row.path.text, result.tenant, uid),
                 )
             else:
-                new += 1
                 db.execute(
                     "INSERT INTO paths VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -173,7 +197,8 @@ def record(result: AnalysisResult, path: str | Path) -> HistoryDelta:
             if skipped
             else set()
         )
-        resolved_uids = previous_uids - current - unchecked
+        # A start node that still has a path was not fixed, whichever route is now its most likely one.
+        resolved_uids = {uid for uid in previous_uids - current - unchecked if previous[uid] not in current_starts}
         resolved: list[tuple[str, str]] = []
         for uid in sorted(resolved_uids):
             r = db.execute(
@@ -182,8 +207,18 @@ def record(result: AnalysisResult, path: str | Path) -> HistoryDelta:
             if r:
                 resolved.append((r[0], r[1]))
         db.commit()
-        # Exposure is only comparable between runs of the same risk model.
-        prev_exposure = prev[3] if prev and prev[4] == model else None
-        return HistoryDelta(new, seen, resolved, prev[1] if prev else None, prev[2] if prev else None, prev_exposure)
+        # Numbers are only a trend between runs with the same analysis settings. Databases written
+        # before the settings were recorded fall back to comparing the risk model.
+        comparable = not prev or (prev[5] == settings_hash if prev[5] else prev[4] == model)
+        return HistoryDelta(
+            new,
+            seen,
+            resolved,
+            prev[1] if prev else None,
+            prev[2] if prev else None,
+            prev[3] if prev and comparable else None,
+            rerouted,
+            comparable,
+        )
     finally:
         db.close()

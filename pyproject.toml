@@ -1,12 +1,14 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "goodhound-enterprise"
-version = "0.1.0"
+dynamic = ["version"]
 description = "GoodHound-style busiest-path and weakest-link prioritisation for BloodHound Enterprise, via the Hunter MCP server (or the BHE REST API)."
 readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=2.3,<3",
@@ -14,13 +16,20 @@ dependencies = [
 
 [project.optional-dependencies]
 fleet = ["anthropic>=2.6,<3"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "anthropic>=2.6,<3"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.11", "anthropic>=2.6,<3"]
 
 [project.scripts]
 goodhound-enterprise = "goodhound_enterprise.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["goodhound_enterprise*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "goodhound_enterprise.__version__" }
+
+[tool.mypy]
+python_version = "3.11"
+files = ["goodhound_enterprise"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

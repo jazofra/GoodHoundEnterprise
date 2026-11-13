@@ -13,7 +13,7 @@
 | Probability-weighted exposure | 35.84% |
 | Start nodes with a path (total paths) | 9 |
 | History | First run for this tenant: baseline recorded |
-| Queries sent | 53 |
+| Queries sent | 54 |
 
 ## Busiest paths
 | # | Starting Node | Users | % of Users | Hops | Paths | Path Prob. | Reach Prob. | Risk | Path |

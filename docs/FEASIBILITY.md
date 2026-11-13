@@ -80,7 +80,7 @@ CE/Legacy:
 | Weakest links = most common relationship | The link behind a path to 100% of users can rank below a link shared by a few small groups | Ranked by **exposure removed**, recomputed with distinct users (users who keep another route don't count) |
 | Weakest-link query via `apoc.path.combine` | No APOC | Counted on the client, with a plain one-edge view query per link |
 | "BloodHound query" matched by `name` | — | Matched by `objectid` and ending in `LIMIT 1`, so it works in Explore **and** through Hunter |
-| SQLite `paths` table | It only knew "new" | `runs` + `paths` + `observations` tables add **paths no longer seen** (fixed or re-routed) and trend data. The uid uses object ids, so renames do not create "new" paths |
+| SQLite `paths` table | It only knew "new" | `runs` + `paths` + `observations` tables add **paths no longer seen**, start nodes whose most likely path changed, and trend data (only between runs with the same analysis settings). The uid uses object ids, so renames do not create "new" paths |
 | Scan date from a DC's `lastlogontimestamp` | — | Run timestamp, since BHE collects continuously |
 | stdout / csv / md / html | The `-o markdown` branch was broken | stdout / csv / md / html / **json**. The HTML escapes AD-controlled strings |
 
@@ -195,6 +195,12 @@ catalogue and the result of `bloodhound_status`.
   nodes are not reported as resolved in the history. If more than 25 start
   nodes (or 2% of those scanned) fail, the run aborts instead of recording a
   misleading baseline, and a query Hunter rejects outright still aborts it.
+  The same rules apply to users with `--include-users`.
+- **Interrupted runs can resume.** Every answer is kept in a checkpoint file
+  while a run is in progress. After a crash or Ctrl-C, the same command with
+  `--resume` reuses the answers that are less than 24 hours old and sends only
+  the remaining queries. The file holds tenant data (mode 0600) and is removed
+  when the run completes.
 - **Reports are sensitive.** They are a map of how to own the domain, so store
   them accordingly. In agentic mode, graph data reaches the LLM provider, and
   Hunter's docs require an MCP client approved for your BloodHound data.

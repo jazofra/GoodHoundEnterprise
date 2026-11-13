@@ -77,6 +77,37 @@ class Graph:
         self.literals.extend(other.literals)
 
 
+def reaches_path_limit(graph: Graph, start_objectid: str, limit: int, max_steps: int = 50_000) -> bool:
+    """Whether a shortest-path result may have been cut off at ``limit`` rows.
+
+    The backend returns the union of the paths, not the rows, so the row count is gone.
+    Every returned row is a distinct simple path from the start to a target inside that
+    union, so fewer than ``limit`` such paths proves nothing was cut. The reverse does
+    not hold (the union can hold more paths than rows), hence "may".
+    """
+    start = graph.by_objectid(start_objectid)
+    if start is None:
+        return False
+    out: dict[str, list[str]] = {}
+    for edge in graph.edges:
+        out.setdefault(edge.source, []).append(edge.target)
+    found = steps = 0
+    stack: list[tuple[str, frozenset[str]]] = [(start.id, frozenset({start.id}))]
+    while stack:
+        node_id, seen = stack.pop()
+        for target in out.get(node_id, ()):
+            if target in seen:
+                continue
+            steps += 1
+            node = graph.nodes.get(target)
+            if node is not None and node.tier_zero:
+                found += 1
+            if found >= limit or steps >= max_steps:
+                return True
+            stack.append((target, seen | {target}))
+    return False
+
+
 # --------------------------------------------------------------------------
 # Parsing
 # --------------------------------------------------------------------------
